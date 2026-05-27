@@ -1,0 +1,9 @@
+{
+  "name": "Host CRM",
+  "short_name": "Host CRM",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F5F3EF",
+  "theme_color": "#1A1A1A",
+  "icons": []
+}
