@@ -5,12 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Host CRM" />
     <meta name="theme-color" content="#F5F3EF" />
+    <link rel="apple-touch-startup-image" href="/CRM2/">
     <title>Host CRM</title>
-    <link rel="manifest" href="/manifest.json" />
+    <script>
+      if (window.navigator.standalone && location.pathname === '/') {
+        location.replace('/CRM2/');
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <script type="module" src="./src/main.jsx"></script>
   </body>
 </html>
