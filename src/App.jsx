@@ -184,18 +184,19 @@ function Dashboard({ events }) {
   const avg     = withPrice.length ? Math.round(revenue/withPrice.length) : 0;
   const margin  = revenue ? Math.round(prof/revenue*100) : 0;
 
-  // by month (revenue + profit)
+  // by month
   const byMonth={};
   all.forEach(ev=>{
     if(!ev.date) return;
     const [y,m]=ev.date.split("-");
     const k=`${y}-${m}`;
-    if(!byMonth[k]) byMonth[k]={key:k,label:`${MONTHS_SHORT[parseInt(m)-1]}`,year:y,rev:0,prof:0,count:0};
+    if(!byMonth[k]) byMonth[k]={key:k,name:MONTHS_RU[parseInt(m)-1],year:y,rev:0,exp:0,prof:0,count:0};
     byMonth[k].rev  += parseMoney(ev.totalCost);
+    byMonth[k].exp  += parseMoney(ev.expenses);
     byMonth[k].prof += profit(ev);
     byMonth[k].count+= 1;
   });
-  const months=Object.values(byMonth).sort((a,b)=>a.key.localeCompare(b.key));
+  const months=Object.values(byMonth).sort((a,b)=>b.key.localeCompare(a.key));
   const maxRev=Math.max(...months.map(m=>m.rev),1);
 
   return (
@@ -247,24 +248,22 @@ function Dashboard({ events }) {
       {months.length>0&&(
         <div style={s.panel}>
           <div style={s.panelTitle}>Динамика по месяцам</div>
-          <div style={{display:"flex",gap:5,alignItems:"flex-end",height:130,marginTop:6}}>
-            {months.map((m,i)=>(
-              <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:5,minWidth:0}}>
-                <div style={{flex:1,width:"100%",display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-                  <div style={{width:"70%",maxWidth:26,height:`${Math.max(Math.round(m.rev/maxRev*100),3)}%`,background:C.bgAlt,position:"relative",borderRadius:"3px 3px 0 0",overflow:"hidden"}}>
-                    <div style={{position:"absolute",bottom:0,left:0,right:0,height:`${m.rev?Math.round(m.prof/m.rev*100):0}%`,background:C.brass}}/>
-                  </div>
-                </div>
-                <div style={{fontSize:9,color:C.textSub,fontWeight:600}}>{m.label}</div>
+          {months.map((m,i)=>(
+            <div key={i} style={{padding:"14px 0",borderTop:i>0?`1px solid ${C.line}`:"none"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:9}}>
+                <span style={{fontSize:14,fontWeight:700,color:C.text}}>{m.name} <span style={{color:C.textMut,fontWeight:500,fontSize:12.5}}>{m.year}</span></span>
+                <span style={{fontSize:11,color:C.textSub,fontWeight:600}}>{m.count} {m.count===1?"заказ":m.count<5?"заказа":"заказов"}</span>
               </div>
-            ))}
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:5,marginTop:12}}>
-            <span style={{width:9,height:9,borderRadius:2,background:C.bgAlt,flexShrink:0}}/>
-            <span style={{fontSize:11,color:C.textSub}}>Выручка</span>
-            <span style={{width:9,height:9,borderRadius:2,background:C.brass,flexShrink:0,marginLeft:14}}/>
-            <span style={{fontSize:11,color:C.textSub}}>Прибыль</span>
-          </div>
+              <div style={{height:8,background:C.bgAlt,borderRadius:5,overflow:"hidden",display:"flex",marginBottom:9}}>
+                <div style={{width:`${Math.round(m.rev/maxRev*100)}%`,background:C.brass,height:"100%"}}/>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                <div><div style={{fontSize:10,color:C.textMut,marginBottom:2}}>Выручка</div><div style={{fontSize:13,fontWeight:700,color:C.text}}>{fmt(m.rev)} ₽</div></div>
+                <div><div style={{fontSize:10,color:C.textMut,marginBottom:2}}>Расходы</div><div style={{fontSize:13,fontWeight:700,color:C.textSub}}>{fmt(m.exp)} ₽</div></div>
+                <div><div style={{fontSize:10,color:C.textMut,marginBottom:2}}>Прибыль</div><div style={{fontSize:13,fontWeight:700,color:C.brass}}>{fmt(m.prof)} ₽</div></div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
