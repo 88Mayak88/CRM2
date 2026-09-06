@@ -48,7 +48,7 @@ const emptyEvent = () => ({ id:Date.now().toString(), title:"", date:"", prepayD
   clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", notes:"",
   createdAt:new Date().toISOString(), archived:false });
 
-const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal" };
+const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal", MONTH:"month" };
 
 // ── palette: "atelier" — deep ink + warm paper + a single brass accent ──
 const C = {
@@ -173,7 +173,7 @@ function Stat({ label, value, tone, big }) {
   );
 }
 
-function Dashboard({ events }) {
+function Dashboard({ events, onMonthClick }) {
   const all = events; // ВСЕ заказы
   const revenue = all.reduce((s,e)=>s+parseMoney(e.totalCost),0);
   const expenses= all.reduce((s,e)=>s+parseMoney(e.expenses),0);
@@ -249,10 +249,10 @@ function Dashboard({ events }) {
         <div style={s.panel}>
           <div style={s.panelTitle}>Динамика по месяцам</div>
           {months.map((m,i)=>(
-            <div key={i} style={{padding:"14px 0",borderTop:i>0?`1px solid ${C.line}`:"none"}}>
+            <div key={i} className="card-press" onClick={()=>onMonthClick(m.key)} style={{padding:"14px 4px",borderTop:i>0?`1px solid ${C.line}`:"none",cursor:"pointer",margin:"0 -4px",borderRadius:8}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:9}}>
                 <span style={{fontSize:14,fontWeight:700,color:C.text}}>{m.name} <span style={{color:C.textMut,fontWeight:500,fontSize:12.5}}>{m.year}</span></span>
-                <span style={{fontSize:11,color:C.textSub,fontWeight:600}}>{m.count} {m.count===1?"заказ":m.count<5?"заказа":"заказов"}</span>
+                <span style={{fontSize:11,color:C.textSub,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>{m.count} {m.count===1?"заказ":m.count<5?"заказа":"заказов"}<span style={{color:C.brass,fontSize:16}}>›</span></span>
               </div>
               <div style={{height:8,background:C.bgAlt,borderRadius:5,overflow:"hidden",display:"flex",marginBottom:9}}>
                 <div style={{width:`${Math.round(m.rev/maxRev*100)}%`,background:C.brass,height:"100%"}}/>
@@ -414,6 +414,8 @@ function App() {
   const [loading,setLoading]=useState(true);
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState(null);
+  const [monthKey,setMonthKey]=useState(null);
+  const [origin,setOrigin]=useState(V.LIST);
   const notesTimer=useRef(null);
 
   useEffect(()=>{ (async()=>{ try{ setEvents(await dbLoad()); }catch(e){ setError("Не удалось загрузить: "+e.message); }finally{ setLoading(false);} })(); },[]);
@@ -422,7 +424,7 @@ function App() {
   const activeEvents=[...events].filter(e=>!e.archived).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
   const archivedEvents=[...events].filter(e=>e.archived).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 
-  const openEvent=(ev)=>{ setActiveId(ev.id); setView(V.EVENT); };
+  const openEvent=(ev,from)=>{ setActiveId(ev.id); if(from) setOrigin(from); setView(V.EVENT); };
   const openNew=()=>{ setDraft(emptyEvent()); setView(V.FORM); };
   const openEdit=()=>{ setDraft({...emptyEvent(),...activeEvent}); setView(V.FORM); };
 
@@ -456,7 +458,7 @@ function App() {
       {error&&<Err error={error} clear={()=>setError(null)}/>}
       <div style={{flex:1,overflowY:"auto"}}>
         {activeEvents.length===0&&<div style={s.empty}><IconList color={C.textMut}/><div style={{fontSize:15,color:C.text,fontWeight:600,marginTop:12}}>Пока нет заказов</div><div style={{color:C.textMut,fontSize:13,marginTop:4}}>Нажми ＋ чтобы добавить первый</div></div>}
-        {activeEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>openEvent(ev)}/>)}
+        {activeEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>openEvent(ev,V.LIST)}/>)}
       </div>
       <TabBar view={view} onTab={onTab}/>
     </div>
@@ -468,7 +470,7 @@ function App() {
       {error&&<Err error={error} clear={()=>setError(null)}/>}
       <div style={{flex:1,overflowY:"auto"}}>
         {archivedEvents.length===0&&<div style={s.empty}><IconArchive color={C.textMut}/><div style={{color:C.textMut,fontSize:13,marginTop:12}}>Архив пуст</div></div>}
-        {archivedEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>openEvent(ev)}/>)}
+        {archivedEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>openEvent(ev,V.ARCHIVE)}/>)}
       </div>
       <TabBar view={view} onTab={onTab}/>
     </div>
@@ -478,17 +480,33 @@ function App() {
     <div style={s.screen}><TopBar title="Клиенты"/><Clients events={events}/><TabBar view={view} onTab={onTab}/></div>
   );
   if(view===V.CAL) return (
-    <div style={s.screen}><TopBar title="Календарь"/><Calendar events={events} onEventClick={ev=>{setActiveId(ev.id);setView(V.EVENT);}}/><TabBar view={view} onTab={onTab}/></div>
+    <div style={s.screen}><TopBar title="Календарь"/><Calendar events={events} onEventClick={ev=>{setActiveId(ev.id);setOrigin(V.CAL);setView(V.EVENT);}}/><TabBar view={view} onTab={onTab}/></div>
   );
   if(view===V.DASH) return (
-    <div style={s.screen}><TopBar title="Аналитика" sub="по всем заказам"/><Dashboard events={events}/><TabBar view={view} onTab={onTab}/></div>
+    <div style={s.screen}><TopBar title="Аналитика" sub="по всем заказам"/><Dashboard events={events} onMonthClick={(k)=>{setMonthKey(k);setView(V.MONTH);}}/><TabBar view={view} onTab={onTab}/></div>
   );
+
+  if(view===V.MONTH&&monthKey) {
+    const [my,mm]=monthKey.split("-");
+    const monthName=MONTHS_RU[parseInt(mm)-1];
+    const monthEvents=[...events].filter(e=>(e.date||"").startsWith(monthKey)).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+    const mRev=monthEvents.reduce((s,e)=>s+parseMoney(e.totalCost),0);
+    return (
+      <div style={s.screen}>
+        <TopBar left={<BackBtn onClick={()=>setView(V.DASH)}/>} title={`${monthName} ${my}`} sub={`${monthEvents.length} ${monthEvents.length===1?"заказ":monthEvents.length<5?"заказа":"заказов"} · ${fmt(mRev)} ₽`}/>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {monthEvents.length===0&&<div style={s.empty}><div style={{color:C.textMut,fontSize:13}}>В этом месяце заказов нет</div></div>}
+          {monthEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>{setActiveId(ev.id);setOrigin(V.MONTH);setView(V.EVENT);}}/>)}
+        </div>
+      </div>
+    );
+  }
 
   if(view===V.EVENT&&activeEvent) {
     const rem=remaining(activeEvent), pr=profit(activeEvent), isArc=activeEvent.archived;
     return (
       <div style={s.screen}>
-        <TopBar left={<BackBtn onClick={()=>setView(isArc?V.ARCHIVE:V.LIST)}/>} title={activeEvent.title}
+        <TopBar left={<BackBtn onClick={()=>setView(isArc?V.ARCHIVE:origin)}/>} title={activeEvent.title}
           right={<div style={{display:"flex",gap:5}}>
             {!isArc&&<button style={s.iconBtn} className="press" onClick={openEdit}><IconEdit color={C.textSub}/></button>}
             <button style={s.iconBtn} className="press" onClick={()=>setArc(true)}>{isArc?<IconUnarc color={C.green}/>:<IconArc color={C.amber}/>}</button>
