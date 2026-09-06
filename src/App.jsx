@@ -45,7 +45,7 @@ function formatDate(d)    { if(!d) return ""; const [y,m,day]=d.split("-"); retu
 function fmt(n)           { return n.toLocaleString("ru"); }
 
 const emptyEvent = () => ({ id:Date.now().toString(), title:"", date:"", prepayDate:"", source:"",
-  clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", notes:"",
+  clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", expensesNote:"", notes:"",
   createdAt:new Date().toISOString(), archived:false });
 
 const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal", MONTH:"month" };
@@ -142,9 +142,10 @@ function IconUnarc({color}){return(<svg width="17" height="17" viewBox="0 0 24 2
 function IconTrash({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M5 7h14M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 12a1 1 0 001 1h8a1 1 0 001-1l1-12" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>);}
 
 // ── event card ──
-function EventCard({ ev, onClick }) {
+function EventCard({ ev, onClick, showFinance }) {
   const rem=remaining(ev);
   const paid = ev.totalCost && rem===0;
+  const exp = parseMoney(ev.expenses);
   return (
     <div style={s.card} className="card-press" onClick={onClick}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
@@ -158,6 +159,12 @@ function EventCard({ ev, onClick }) {
         {rem>0&&<Chip tone="red">Остаток {fmt(rem)} ₽</Chip>}
         {paid&&<Chip tone="green">Оплачено</Chip>}
       </div>
+      {showFinance&&ev.totalCost&&(
+        <div style={s.finRow}>
+          <div style={s.finItem}><span style={s.finKey}>Расходы</span><span style={s.finVal}>{exp?fmt(exp)+" ₽":"—"}</span></div>
+          <div style={s.finItem}><span style={s.finKey}>Прибыль</span><span style={{...s.finVal,color:C.brass,fontWeight:700}}>{fmt(profit(ev))} ₽</span></div>
+        </div>
+      )}
     </div>
   );
 }
@@ -491,12 +498,21 @@ function App() {
     const monthName=MONTHS_RU[parseInt(mm)-1];
     const monthEvents=[...events].filter(e=>(e.date||"").startsWith(monthKey)).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
     const mRev=monthEvents.reduce((s,e)=>s+parseMoney(e.totalCost),0);
+    const mExp=monthEvents.reduce((s,e)=>s+parseMoney(e.expenses),0);
+    const mProf=monthEvents.reduce((s,e)=>s+profit(e),0);
     return (
       <div style={s.screen}>
         <TopBar left={<BackBtn onClick={()=>setView(V.DASH)}/>} title={`${monthName} ${my}`} sub={`${monthEvents.length} ${monthEvents.length===1?"заказ":monthEvents.length<5?"заказа":"заказов"} · ${fmt(mRev)} ₽`}/>
+        {monthEvents.length>0&&(
+          <div style={s.monthTotals}>
+            <div style={s.mtItem}><div style={s.mtKey}>Выручка</div><div style={s.mtVal}>{fmt(mRev)} ₽</div></div>
+            <div style={s.mtItem}><div style={s.mtKey}>Расходы</div><div style={{...s.mtVal,color:C.textSub}}>{fmt(mExp)} ₽</div></div>
+            <div style={s.mtItem}><div style={s.mtKey}>Прибыль</div><div style={{...s.mtVal,color:C.brass}}>{fmt(mProf)} ₽</div></div>
+          </div>
+        )}
         <div style={{flex:1,overflowY:"auto"}}>
           {monthEvents.length===0&&<div style={s.empty}><div style={{color:C.textMut,fontSize:13}}>В этом месяце заказов нет</div></div>}
-          {monthEvents.map(ev=><EventCard key={ev.id} ev={ev} onClick={()=>{setActiveId(ev.id);setOrigin(V.MONTH);setView(V.EVENT);}}/>)}
+          {monthEvents.map(ev=><EventCard key={ev.id} ev={ev} showFinance onClick={()=>{setActiveId(ev.id);setOrigin(V.MONTH);setView(V.EVENT);}}/>)}
         </div>
       </div>
     );
@@ -534,6 +550,7 @@ function App() {
               {activeEvent.paidCost&&<div style={s.moneyRow}><span style={s.moneyKey}>Оплачено</span><span style={{...s.moneyVal,color:C.green}}>{activeEvent.paidCost} ₽</span></div>}
               <div style={s.moneyRow}><span style={s.moneyKey}>Остаток</span><span style={{...s.moneyVal,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
               {activeEvent.expenses&&<div style={s.moneyRow}><span style={s.moneyKey}>Расходы</span><span style={{...s.moneyVal,color:C.textSub}}>{activeEvent.expenses} ₽</span></div>}
+              {activeEvent.expensesNote&&<div style={s.expNote}>{activeEvent.expensesNote}</div>}
               {activeEvent.expenses&&<div style={{...s.moneyRow,borderTop:`1px solid ${C.line}`,paddingTop:10,marginTop:2}}><span style={{...s.moneyKey,fontWeight:700,color:C.text}}>Прибыль</span><span style={{...s.moneyVal,color:C.brass,fontWeight:800}}>{fmt(pr)} ₽</span></div>}
             </div>
           )}
@@ -580,6 +597,7 @@ function App() {
             <Field label="Оплачено, ₽"><input style={s.fld} className="fld" placeholder="25 000" inputMode="numeric" value={draft.paidCost} onChange={e=>setField("paidCost",formatMoney(e.target.value))}/></Field>
           </div>
           <Field label="Расходы, ₽" hint="Аренда, реквизит, помощники — для расчёта прибыли"><input style={s.fld} className="fld" placeholder="10 000" inputMode="numeric" value={draft.expenses} onChange={e=>setField("expenses",formatMoney(e.target.value))}/></Field>
+          <Field label="На что расходы" hint="Например: аренда зала 5000, помощник 3000, реквизит 2000"><textarea style={{...s.fld,minHeight:70,resize:"vertical",lineHeight:1.5}} className="fld" placeholder="Опиши, на что потрачены деньги" value={draft.expensesNote} onChange={e=>setField("expensesNote",e.target.value)}/></Field>
           {draft.totalCost&&(
             <div style={s.formSummary}>
               <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:C.textSub}}>Остаток к оплате</span><span style={{fontSize:14,fontWeight:700,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
@@ -625,6 +643,10 @@ const s = {
   tabBtn:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",background:"none",border:"none",cursor:"pointer",gap:1,padding:"8px 0"},
   spinner:{width:30,height:30,border:`2.5px solid ${C.line}`,borderTopColor:C.ink,borderRadius:"50%",animation:"spin 0.7s linear infinite"},
   err:{background:C.redBg,color:C.red,fontSize:12.5,padding:"11px 16px",cursor:"pointer",flexShrink:0,fontWeight:500},
+  monthTotals:{display:"flex",background:C.surface,borderBottom:`1px solid ${C.line}`,padding:"12px 16px",flexShrink:0},
+  mtItem:{flex:1,display:"flex",flexDirection:"column",gap:3},
+  mtKey:{fontSize:10,color:C.textMut,fontWeight:600,letterSpacing:0.3,textTransform:"uppercase"},
+  mtVal:{fontSize:15,fontWeight:800,color:C.text,letterSpacing:-0.3},
   arcBanner:{background:C.amberBg,color:C.amber,fontSize:12,padding:"9px 16px",flexShrink:0,fontWeight:700,letterSpacing:0.2},
   empty:{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"70px 40px",flex:1,textAlign:"center",opacity:0.9},
   card:{padding:"15px 16px",cursor:"pointer",background:C.surface,borderBottom:`1px solid ${C.line}`},
@@ -632,6 +654,10 @@ const s = {
   cardDate:{fontSize:12,color:C.textMut,whiteSpace:"nowrap",fontWeight:600},
   cardSub:{fontSize:12.5,color:C.textSub,marginTop:2,marginBottom:9},
   cardChips:{display:"flex",flexWrap:"wrap",gap:6,marginTop:2},
+  finRow:{display:"flex",gap:20,marginTop:11,paddingTop:11,borderTop:`1px solid ${C.line}`},
+  finItem:{display:"flex",flexDirection:"column",gap:2},
+  finKey:{fontSize:10,color:C.textMut,fontWeight:500},
+  finVal:{fontSize:13,color:C.text,fontWeight:600},
   chip:{fontSize:11,fontWeight:600,padding:"4px 9px",borderRadius:7,letterSpacing:0.1},
   phoneLink:{fontSize:14,color:C.brass,fontWeight:700,textDecoration:"none",display:"block",margin:"5px 0 9px"},
   search:{width:"100%",background:C.surface,border:`1px solid ${C.line}`,color:C.text,padding:"12px 15px",fontSize:14.5,fontFamily:"inherit",borderRadius:12,outline:"none",boxSizing:"border-box"},
@@ -640,6 +666,7 @@ const s = {
   detailRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 0",borderBottom:`1px solid ${C.line}`},
   detailKey:{fontSize:13,color:C.textSub},
   detailVal:{fontSize:14,color:C.text,fontWeight:600,textAlign:"right"},
+  expNote:{fontSize:12.5,color:C.textSub,lineHeight:1.55,padding:"2px 0 8px",whiteSpace:"pre-wrap"},
   moneyBlock:{background:C.surface,border:`1px solid ${C.line}`,borderRadius:16,padding:"14px 16px",marginBottom:12},
   moneyRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0"},
   moneyKey:{fontSize:13.5,color:C.textSub},
