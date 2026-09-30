@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, getDocs, setDoc, deleteDoc, doc, orderBy, query } from "firebase/firestore";
+import { getFirestore, collection, getDocs, setDoc, deleteDoc, doc, orderBy, query, writeBatch } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDtaJluedup1Ojwmqg-WTyf9ySok58mlVE",
@@ -19,7 +19,20 @@ async function dbLoad() {
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
-async function dbUpsert(ev) { await setDoc(doc(db, COL, ev.id), ev); }
+async function dbUpsert(ev) { await setDoc(doc(db, COL, ev.id), baseEvent(ev)); }
+const TX = "transactions", AS = "assets";
+async function loadCol(name){ const snap=await getDocs(collection(db,name)); return snap.docs.map(d=>({id:d.id,...d.data()})); }
+async function saveDoc(name,obj){ await setDoc(doc(db,name,obj.id),obj); }
+async function removeDoc(name,id){ await deleteDoc(doc(db,name,id)); }
+async function commitOps(ops){ for(let i=0;i<ops.length;i+=400){ const b=writeBatch(db); ops.slice(i,i+400).forEach(([col,obj,del])=>del?b.delete(doc(db,col,obj.id)):b.set(doc(db,col,obj.id),obj)); await b.commit(); } }
+const BASE_FIELDS=["id","title","date","prepayDate","source","clientName","clientPhone","totalCost","notes","createdAt","archived","finMigrated"];
+function baseEvent(ev){
+  if(!ev.finMigrated){ const {incomeTxs,expenseTxs,...rest}=ev; return rest; }
+  const o={}; BASE_FIELDS.forEach(k=>{ if(ev[k]!==undefined) o[k]=ev[k]; }); return o;
+}
+function newId(p){ return p+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function pad2(n){ return String(n).padStart(2,"0"); }
+function todayISO(){ const d=new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
 async function dbDelete(id) { await deleteDoc(doc(db, COL, id)); }
 
 // ── helpers ──
@@ -49,6 +62,16 @@ function legacyItems(ev){
   return [];
 }
 function csvCell(v){ const s=String(v??""); return /[;"\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
+async function shareCsv(table,name){
+  const csv="\uFEFF"+table.map(r=>r.map(csvCell).join(";")).join("\r\n");
+  const file=new File([csv],name,{type:"text/csv;charset=utf-8"});
+  if(navigator.canShare&&navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file],title:name}); return; }catch(e){ if(e.name==="AbortError") return; }
+  }
+  const url=URL.createObjectURL(file);
+  const a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
 async function exportEvents(events){
   const head=["Дата","Название","Статус","Заказчик","Телефон","Откуда клиент","Стоимость","Оплачено","Остаток","Дата предоплаты","Расходы","Расшифровка расходов","Прибыль","Заметки"];
   const rows=[...events].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(ev=>{
@@ -60,24 +83,48 @@ async function exportEvents(events){
       profit(ev), ev.notes||""
     ];
   });
-  const csv="\uFEFF"+[head,...rows].map(r=>r.map(csvCell).join(";")).join("\r\n");
-  const name=`host-crm-${new Date().toISOString().slice(0,10)}.csv`;
-  const file=new File([csv],name,{type:"text/csv;charset=utf-8"});
-  if(navigator.canShare&&navigator.canShare({files:[file]})){
-    try{ await navigator.share({files:[file],title:"Выгрузка заказов"}); return; }catch(e){ if(e.name==="AbortError") return; }
-  }
-  const url=URL.createObjectURL(file);
-  const a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  await shareCsv([head,...rows],`host-crm-заказы-${todayISO()}.csv`);
 }
+async function exportTransactions(txs,events){
+  const head=["Дата","Тип","Сумма","Категория","Описание","Мероприятие"];
+  const rows=[...txs].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(t=>{
+    const ev=events.find(e=>e.id===t.eventId);
+    return [formatDate(t.date), t.type==="income"?"Доход":"Расход", parseMoney(t.amount), t.category||"", t.name||"", ev?`${ev.title}${ev.date?" ("+formatDate(ev.date)+")":""}`:""];
+  });
+  await shareCsv([head,...rows],`host-crm-финансы-${todayISO()}.csv`);
+}
+function sumTx(list){ return list.reduce((s,t)=>s+parseMoney(t.amount),0); }
+function sumAmt(list){ return list.reduce((s,t)=>s+parseMoney(t.amount),0); }
+function enrich(rawEvents,txs){
+  const by={};
+  txs.forEach(t=>{ if(t.eventId) (by[t.eventId]=by[t.eventId]||[]).push(t); });
+  return rawEvents.map(ev=>{
+    if(!ev.finMigrated) return ev;
+    const linked=(by[ev.id]||[]).slice().sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+    const inc=linked.filter(t=>t.type==="income"), exp=linked.filter(t=>t.type==="expense");
+    const p=sumTx(inc), e=sumTx(exp);
+    return {...ev, paidCost:p?formatMoney(String(p)):"", expenses:e?formatMoney(String(e)):"",
+      expenseItems:exp.map(t=>({name:t.name||t.category,amount:t.amount})), incomeTxs:inc, expenseTxs:exp};
+  });
+}
+function migrationFor(ev){
+  const now=new Date().toISOString(), day=ev.date||todayISO(), out=[];
+  legacyItems(ev).forEach((it,i)=>{ if(parseMoney(it.amount)>0) out.push({id:`mig-e-${ev.id}-${i}`,type:"expense",date:day,amount:it.amount,name:it.name||"Расходы",category:"Мероприятия",eventId:ev.id,createdAt:now}); });
+  if(parseMoney(ev.paidCost)>0) out.push({id:`mig-i-${ev.id}`,type:"income",date:ev.prepayDate||day,amount:ev.paidCost,name:"Оплата",category:"Мероприятия",eventId:ev.id,createdAt:now});
+  return out;
+}
+const INCOME_CATS  = ["Мероприятия","Подработка","Проценты и дивиденды","Подарки","Другое"];
+const EXPENSE_CATS = ["Мероприятия","Реквизит","Транспорт","Реклама","Связь","Продукты","Жильё","Здоровье","Развлечения","Другое"];
+const ASSET_CATS   = ["Счета и наличные","Вклады","Акции и облигации","Дал в долг"];
+const LIAB_CATS    = ["Кредиты","Мои долги"];
 function formatDate(d)    { if(!d) return ""; const [y,m,day]=d.split("-"); return `${day}.${m}.${y}`; }
 function fmt(n)           { return n.toLocaleString("ru"); }
 
 const emptyEvent = () => ({ id:Date.now().toString(), title:"", date:"", prepayDate:"", source:"",
   clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", expensesNote:"", expenseItems:[], notes:"",
-  createdAt:new Date().toISOString(), archived:false });
+  createdAt:new Date().toISOString(), archived:false, finMigrated:true });
 
-const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal", MONTH:"month" };
+const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal", MONTH:"month", FIN:"fin", TX:"tx", ASSET:"asset" };
 
 // ── palette: "atelier" — deep ink + warm paper + a single brass accent ──
 const C = {
@@ -142,6 +189,7 @@ function TabBar({ view, onTab }) {
     {id:V.CAL,label:"Календарь",icon:IconCal},
     {id:V.CLIENTS,label:"Клиенты",icon:IconUsers},
     {id:V.DASH,label:"Аналитика",icon:IconChart},
+    {id:V.FIN,label:"Финансы",icon:IconWallet},
     {id:V.ARCHIVE,label:"Архив",icon:IconArchive},
   ];
   return (
@@ -164,6 +212,71 @@ function IconList({color}){return(<svg width="21" height="21" viewBox="0 0 24 24
 function IconCal({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="4" y="5" width="16" height="15" rx="2" stroke={color} strokeWidth="1.6"/><path d="M4 9h16M8 3v3M16 3v3" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
 function IconUsers({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.2" stroke={color} strokeWidth="1.6"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke={color} strokeWidth="1.6" strokeLinecap="round"/><path d="M16 14c2.5 0 4.5 2 4.5 5" stroke={color} strokeWidth="1.6" strokeLinecap="round"/><circle cx="17" cy="8" r="2.6" stroke={color} strokeWidth="1.6"/></svg>);}
 function IconChart({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
+function IconWallet({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="6" width="17" height="13" rx="2.5" stroke={color} strokeWidth="1.6"/><path d="M16 12.5h4.5M6.5 6l8-2.5 1.3 2.5" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><circle cx="16.5" cy="12.5" r="0.9" fill={color}/></svg>);}
+function IconDownload({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg>);}
+function TxRow({ t, meta, onClick }) {
+  const inc=t.type==="income";
+  return (
+    <div style={s.txRow} className="card-press" onClick={onClick}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={s.txName}>{t.name||t.category||(inc?"Доход":"Расход")}</div>
+        {meta&&<div style={s.txMeta}>{meta}</div>}
+      </div>
+      <div style={{...s.txAmt,color:inc?C.green:C.text}}>{inc?"+":"−"}{fmt(parseMoney(t.amount))} ₽</div>
+    </div>
+  );
+}
+function AssetsView({ assets, onOpen }) {
+  const A=assets.filter(a=>a.kind!=="liability"), L=assets.filter(a=>a.kind==="liability");
+  const ta=sumAmt(A), tl=sumAmt(L);
+  const group=(title,cats,list,isL)=>{
+    const known=cats.map(cat=>({cat,items:list.filter(a=>a.category===cat)}));
+    const other=list.filter(a=>!cats.includes(a.category));
+    if(other.length) known.push({cat:"Прочее",items:other});
+    const shown=known.filter(g=>g.items.length);
+    if(!shown.length) return null;
+    return (
+      <>
+        <div style={s.groupHead}>{title}</div>
+        {shown.map(g=>(
+          <div key={g.cat} style={s.panel}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+              <span style={s.panelTitle}>{g.cat}</span>
+              <span style={{fontSize:13,fontWeight:700,color:isL?C.red:C.text}}>{fmt(sumAmt(g.items))} ₽</span>
+            </div>
+            {g.items.map(a=>{
+              const meta=[a.rate?`${a.rate}%`:null,a.dueDate?`до ${formatDate(a.dueDate)}`:null,a.note?a.note.split("\n")[0]:null].filter(Boolean).join(" · ");
+              return (
+                <div key={a.id} style={s.txRow} className="card-press" onClick={()=>onOpen(a)}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={s.txName}>{a.name}</div>
+                    {meta&&<div style={s.txMeta}>{meta}</div>}
+                  </div>
+                  <div style={{...s.txAmt,color:isL?C.red:C.text}}>{fmt(parseMoney(a.amount))} ₽</div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </>
+    );
+  };
+  return (
+    <div style={{flex:1,overflowY:"auto",padding:"4px 16px 28px"}}>
+      <div style={s.heroCard}>
+        <div style={{fontSize:11,letterSpacing:1.5,color:"rgba(255,255,255,0.55)",fontWeight:600,textTransform:"uppercase"}}>Капитал</div>
+        <div style={{fontSize:34,fontWeight:800,color:"#fff",letterSpacing:-1,marginTop:6,lineHeight:1}}>{fmt(ta-tl)} ₽</div>
+        <div style={{display:"flex",gap:22,marginTop:16}}>
+          <div><div style={{fontSize:10,color:"rgba(255,255,255,0.5)",letterSpacing:0.5}}>АКТИВЫ</div><div style={{fontSize:15,color:"#fff",fontWeight:700,marginTop:2}}>{fmt(ta)} ₽</div></div>
+          <div><div style={{fontSize:10,color:"rgba(255,255,255,0.5)",letterSpacing:0.5}}>ПАССИВЫ</div><div style={{fontSize:15,color:"#E9A39C",fontWeight:700,marginTop:2}}>{fmt(tl)} ₽</div></div>
+        </div>
+      </div>
+      {assets.length===0&&<div style={{...s.panel,textAlign:"center",color:C.textSub,fontSize:13,lineHeight:1.6}}>Здесь будут вклады, счета, акции и облигации, а также долги и кредиты.<br/>Нажми ＋ чтобы добавить первую позицию.</div>}
+      {group("Активы",ASSET_CATS,A,false)}
+      {group("Пассивы",LIAB_CATS,L,true)}
+    </div>
+  );
+}
 function IconArchive({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="4" rx="1" stroke={color} strokeWidth="1.6"/><path d="M5.5 8v10a1 1 0 001 1h11a1 1 0 001-1V8" stroke={color} strokeWidth="1.6"/><path d="M10 12h4" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
 function IconEdit({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M15 5l4 4M4 20l1-4L16 5l3 3L8 19l-4 1z" stroke={color} strokeWidth="1.6" strokeLinejoin="round"/></svg>);}
 function IconArc({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="4" rx="1" stroke={color} strokeWidth="1.6"/><path d="M5.5 8v10a1 1 0 001 1h11a1 1 0 001-1V8M10 12h4" stroke={color} strokeWidth="1.6"/></svg>);}
@@ -441,7 +554,18 @@ function NotesEditor({ event, onBack, onSave }) {
 
 // ── main ──
 function App() {
-  const [events,setEvents]=useState([]);
+  const [rawEvents,setRawEvents]=useState([]);
+  const [txs,setTxs]=useState([]);
+  const [assets,setAssets]=useState([]);
+  const events=enrich(rawEvents,txs);
+  const setEvents=(list)=>setRawEvents(list.map(baseEvent));
+  const [txDraft,setTxDraft]=useState(null);
+  const [txBack,setTxBack]=useState(V.FIN);
+  const [txDel,setTxDel]=useState(false);
+  const [finTab,setFinTab]=useState("income");
+  const [finMonth,setFinMonth]=useState(todayISO().slice(0,7));
+  const [assetDraft,setAssetDraft]=useState(null);
+  const [assetDel,setAssetDel]=useState(false);
   const [view,setView]=useState(V.LIST);
   const [activeId,setActiveId]=useState(null);
   const [draft,setDraft]=useState(null);
@@ -454,7 +578,26 @@ function App() {
   const [origin,setOrigin]=useState(V.LIST);
   const notesTimer=useRef(null);
 
-  useEffect(()=>{ (async()=>{ try{ setEvents(await dbLoad()); }catch(e){ setError("Не удалось загрузить: "+e.message); }finally{ setLoading(false);} })(); },[]);
+  useEffect(()=>{ (async()=>{
+    try{
+      const [evs,tx,as]=await Promise.all([dbLoad(),loadCol(TX),loadCol(AS)]);
+      let allTx=tx, allEv=evs;
+      const pending=evs.filter(e=>!e.finMigrated);
+      if(pending.length){
+        try{
+          const ops=[], added=[], known=new Set(tx.map(t=>t.id));
+          pending.forEach(ev=>migrationFor(ev).forEach(t=>{ if(!known.has(t.id)){ ops.push([TX,t]); added.push(t); } }));
+          const migrated=pending.map(ev=>baseEvent({...ev,finMigrated:true}));
+          migrated.forEach(ev=>ops.push([COL,ev]));
+          await commitOps(ops);
+          allTx=[...tx,...added];
+          allEv=evs.map(e=>migrated.find(m=>m.id===e.id)||e);
+        }catch(e){ setError("Не удалось перенести старые оплаты и расходы: "+e.message); }
+      }
+      setRawEvents(allEv); setTxs(allTx); setAssets(as);
+    }catch(e){ setError("Не удалось загрузить: "+e.message); }
+    finally{ setLoading(false); }
+  })(); },[]);
 
   const activeEvent=events.find(e=>e.id===activeId)||null;
   const activeEvents=[...events].filter(e=>!e.archived).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
@@ -462,27 +605,50 @@ function App() {
 
   const openEvent=(ev,from)=>{ setActiveId(ev.id); if(from) setOrigin(from); setView(V.EVENT); };
   const openNew=()=>{ setDraft(emptyEvent()); setView(V.FORM); };
-  const openEdit=()=>{ const items=legacyItems(activeEvent).map(i=>({...i})); setDraft({...emptyEvent(),...activeEvent,expenseItems:items}); setView(V.FORM); };
+  const openEdit=()=>{ setDraft({...emptyEvent(),...baseEvent(activeEvent)}); setView(V.FORM); };
 
   const saveForm=async()=>{
     if(!draft.title.trim()) return; setSaving(true);
-    const items=(draft.expenseItems||[]).filter(i=>(i.name||"").trim()||parseMoney(i.amount)>0);
-    const tot=itemsTotal(items);
-    const clean={...draft,expenseItems:items,expenses:tot?formatMoney(String(tot)):"",expensesNote:""};
+    const clean=baseEvent({...draft});
     try{ await dbUpsert(clean);
-      const exists=events.find(e=>e.id===draft.id);
-      setEvents(exists?events.map(e=>e.id===clean.id?clean:e):[clean,...events]);
+      const exists=rawEvents.find(e=>e.id===clean.id);
+      setRawEvents(exists?rawEvents.map(e=>e.id===clean.id?clean:e):[clean,...rawEvents]);
       setActiveId(clean.id); setView(V.EVENT); setDraft(null);
     }catch(e){ setError("Ошибка: "+e.message); }finally{ setSaving(false); }
   };
   const cancelForm=()=>{ setView(activeId?V.EVENT:V.LIST); setDraft(null); };
-  const doDelete=async()=>{ try{ await dbDelete(activeId); setEvents(events.filter(e=>e.id!==activeId)); const wasArc=activeEvent?.archived; setActiveId(null); setDel(false); setView(wasArc?V.ARCHIVE:V.LIST);}catch(e){setError("Ошибка: "+e.message);} };
+  const doDelete=async()=>{ try{
+      const ops=txs.filter(t=>t.eventId===activeId).map(t=>[TX,{...t,eventId:""}]);
+      ops.push([COL,{id:activeId},true]);
+      await commitOps(ops);
+      setTxs(txs.map(t=>t.eventId===activeId?{...t,eventId:""}:t));
+      setRawEvents(rawEvents.filter(e=>e.id!==activeId));
+      const wasArc=activeEvent?.archived; setActiveId(null); setDel(false); setView(wasArc?V.ARCHIVE:V.LIST);
+    }catch(e){setError("Ошибка: "+e.message);} };
   const doArchive=async()=>{ if(!activeEvent) return; const u={...activeEvent,archived:!activeEvent.archived}; try{ await dbUpsert(u); setEvents(events.map(e=>e.id===activeId?u:e)); setArc(false); setView(u.archived?V.ARCHIVE:V.LIST);}catch(e){setError("Ошибка: "+e.message);} };
   const updateNotes=(val)=>{ const upd=events.map(e=>e.id===activeId?{...e,notes:val}:e); setEvents(upd); clearTimeout(notesTimer.current); notesTimer.current=setTimeout(async()=>{ const ev=upd.find(e=>e.id===activeId); if(ev){try{await dbUpsert(ev);}catch{}} },1500); };
   const setField=(f,v)=>setDraft(d=>({...d,[f]:v}));
-  const setItem=(i,f,v)=>setDraft(d=>{ const items=[...(d.expenseItems||[])]; items[i]={...items[i],[f]:v}; return {...d,expenseItems:items,expenses:formatMoney(String(itemsTotal(items)))}; });
-  const addItem=()=>setDraft(d=>({...d,expenseItems:[...(d.expenseItems||[]),{name:"",amount:""}]}));
-  const removeItem=(i)=>setDraft(d=>{ const items=(d.expenseItems||[]).filter((_,k)=>k!==i); return {...d,expenseItems:items,expenses:formatMoney(String(itemsTotal(items)))}; });
+  const openTx=(t,back)=>{ setTxDraft({...t}); setTxBack(back); setTxDel(false); setView(V.TX); };
+  const newTx=(type,eventId,back)=>openTx({id:newId("t"),type,date:todayISO(),amount:"",name:"",category:eventId?"Мероприятия":"",eventId:eventId||"",createdAt:new Date().toISOString(),_new:true},back);
+  const closeTx=()=>{ setView(txBack); setTxDraft(null); };
+  const saveTx=async()=>{
+    if(parseMoney(txDraft.amount)<=0||saving) return; setSaving(true);
+    const {_new,...t}=txDraft;
+    try{ await saveDoc(TX,t); setTxs(txs.some(x=>x.id===t.id)?txs.map(x=>x.id===t.id?t:x):[...txs,t]); closeTx(); }
+    catch(e){ setError("Ошибка: "+e.message); } finally{ setSaving(false); }
+  };
+  const deleteTx=async()=>{ try{ await removeDoc(TX,txDraft.id); setTxs(txs.filter(x=>x.id!==txDraft.id)); setTxDel(false); closeTx(); }catch(e){ setError("Ошибка: "+e.message); } };
+  const openAsset=(a)=>{ setAssetDraft({...a}); setAssetDel(false); setView(V.ASSET); };
+  const newAsset=()=>openAsset({id:newId("a"),kind:"asset",category:"Вклады",name:"",amount:"",rate:"",dueDate:"",note:"",_new:true});
+  const closeAsset=()=>{ setFinTab("assets"); setView(V.FIN); setAssetDraft(null); };
+  const saveAsset=async()=>{
+    if(!assetDraft.name.trim()||saving) return; setSaving(true);
+    const {_new,...a}={...assetDraft,updatedAt:new Date().toISOString()};
+    try{ await saveDoc(AS,a); setAssets(assets.some(x=>x.id===a.id)?assets.map(x=>x.id===a.id?a:x):[...assets,a]); closeAsset(); }
+    catch(e){ setError("Ошибка: "+e.message); } finally{ setSaving(false); }
+  };
+  const deleteAsset=async()=>{ try{ await removeDoc(AS,assetDraft.id); setAssets(assets.filter(x=>x.id!==assetDraft.id)); setAssetDel(false); closeAsset(); }catch(e){ setError("Ошибка: "+e.message); } };
+  const doExportTx=async()=>{ try{ await exportTransactions(txs,events); }catch(e){ setError("Не удалось выгрузить: "+e.message); } };
   const [exporting,setExporting]=useState(false);
   const doExport=async()=>{ setExporting(true); try{ await exportEvents(events); }catch(e){ setError("Не удалось выгрузить: "+e.message); } finally{ setExporting(false); } };
   const onTab=(t)=>{ setActiveId(null); setDraft(null); setView(t); };
@@ -555,6 +721,143 @@ function App() {
     );
   }
 
+  if(view===V.FIN){
+    const [fy,fm]=finMonth.split("-").map(Number);
+    const shiftMonth=(d)=>{ const dt=new Date(fy,fm-1+d,1); setFinMonth(`${dt.getFullYear()}-${pad2(dt.getMonth()+1)}`); };
+    const monthTx=txs.filter(t=>(t.date||"").startsWith(finMonth));
+    const inc=sumTx(monthTx.filter(t=>t.type==="income")), exp=sumTx(monthTx.filter(t=>t.type==="expense"));
+    const type=finTab==="income"?"income":"expense";
+    const list=monthTx.filter(t=>t.type===type).sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.createdAt||"").localeCompare(a.createdAt||""));
+    const byCat={}; list.forEach(t=>{ const k=t.category||"Без категории"; byCat[k]=(byCat[k]||0)+parseMoney(t.amount); });
+    const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+    const total=type==="income"?inc:exp;
+    const groups=[]; list.forEach(t=>{ const g=groups[groups.length-1]; if(g&&g.date===t.date) g.items.push(t); else groups.push({date:t.date,items:[t]}); });
+    const evTitle=id=>{ const e=events.find(x=>x.id===id); return e?e.title:null; };
+    return (
+      <div style={s.screen}>
+        <TopBar title="Финансы"
+          left={finTab!=="assets"?<button style={s.iconBtn} className="press" onClick={doExportTx}><IconDownload color={C.textSub}/></button>:null}
+          right={<button style={s.addBtn} className="press" onClick={()=>finTab==="assets"?newAsset():newTx(type,"",V.FIN)}>＋</button>}/>
+        {error&&<Err error={error} clear={()=>setError(null)}/>}
+        <div style={{padding:"12px 16px 8px",flexShrink:0}}>
+          <div style={s.seg}>{[["income","Доходы"],["expense","Расходы"],["assets","Активы"]].map(([k,l])=>(
+            <button key={k} className="press" style={{...s.segBtn,...(finTab===k?s.segOn:{})}} onClick={()=>setFinTab(k)}>{l}</button>))}</div>
+        </div>
+        {finTab==="assets"?<AssetsView assets={assets} onOpen={openAsset}/>:(
+          <div style={{flex:1,overflowY:"auto",padding:"4px 16px 28px"}}>
+            <div style={s.monthNav}>
+              <button style={s.calNav} className="press" onClick={()=>shiftMonth(-1)}>‹</button>
+              <span style={{fontSize:16,fontWeight:700,color:C.text}}>{MONTHS_RU[fm-1]} {fy}</span>
+              <button style={s.calNav} className="press" onClick={()=>shiftMonth(1)}>›</button>
+            </div>
+            <div style={s.statGrid}>
+              <div style={s.statCard}><div style={s.statLabel}>Доходы</div><div style={{...s.statValue,fontSize:18,color:C.green}}>{fmt(inc)} ₽</div></div>
+              <div style={s.statCard}><div style={s.statLabel}>Расходы</div><div style={{...s.statValue,fontSize:18}}>{fmt(exp)} ₽</div></div>
+              <div style={{...s.statCard,gridColumn:"span 2",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={s.statLabel}>Итог месяца</div>
+                <div style={{...s.statValue,fontSize:18,color:inc-exp>=0?C.green:C.red}}>{inc-exp>=0?"+":"−"}{fmt(Math.abs(inc-exp))} ₽</div>
+              </div>
+            </div>
+            {cats.length>0&&(
+              <div style={s.panel}>
+                <div style={s.panelTitle}>{type==="income"?"Доходы":"Расходы"} по категориям</div>
+                {cats.map(([k,v])=>(
+                  <div key={k} style={{marginBottom:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:5}}>
+                      <span style={{color:C.text,fontWeight:600}}>{k}</span>
+                      <span style={{color:C.textSub,fontWeight:600}}>{fmt(v)} ₽ · {Math.round(v/total*100)}%</span>
+                    </div>
+                    <div style={{height:6,background:C.bgAlt,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.round(v/total*100)}%`,background:type==="income"?C.green:C.brass,borderRadius:3}}/></div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {groups.length===0&&<div style={{...s.panel,textAlign:"center",color:C.textSub,fontSize:13}}>{type==="income"?"Доходов":"Расходов"} в этом месяце нет</div>}
+            {groups.map(g=>(
+              <div key={g.date}>
+                <div style={s.groupHead}>{formatDate(g.date)}</div>
+                <div style={{...s.panel,padding:"2px 16px"}}>
+                  {g.items.map(t=>{ const et=evTitle(t.eventId);
+                    return <TxRow key={t.id} t={t} meta={<>{t.category}{et&&<>{t.category?" · ":""}<span style={{color:C.brass}}>{et}</span></>}</>} onClick={()=>openTx(t,V.FIN)}/>; })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <TabBar view={view} onTab={onTab}/>
+      </div>
+    );
+  }
+
+  if(view===V.TX&&txDraft){
+    const isInc=txDraft.type==="income";
+    const cats=isInc?INCOME_CATS:EXPENSE_CATS;
+    const setT=(f,v)=>setTxDraft(d=>({...d,[f]:v}));
+    const evOptions=[...events].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+    return (
+      <div style={s.screen}>
+        <TopBar left={<BackBtn onClick={closeTx}/>} title={txDraft._new?(isInc?"Новый доход":"Новый расход"):(isInc?"Доход":"Расход")}
+          right={<button style={{...s.saveBtn,opacity:parseMoney(txDraft.amount)>0&&!saving?1:0.35}} className="press" onClick={saveTx}>{saving?"…":"Готово"}</button>}/>
+        {error&&<Err error={error} clear={()=>setError(null)}/>}
+        <div style={{flex:1,overflowY:"auto",padding:"16px 16px 48px"}}>
+          <div style={{...s.seg,marginBottom:16}}>{[["income","Доход"],["expense","Расход"]].map(([k,l])=>(
+            <button key={k} className="press" style={{...s.segBtn,...(txDraft.type===k?s.segOn:{})}} onClick={()=>setT("type",k)}>{l}</button>))}</div>
+          <div style={s.amountWrap}>
+            <input style={{...s.amountInput,color:isInc?C.green:C.text}} inputMode="numeric" placeholder="0" autoFocus={!!txDraft._new} value={txDraft.amount} onChange={e=>setT("amount",formatMoney(e.target.value))}/>
+            <span style={s.amountCur}>₽</span>
+          </div>
+          <Field label="Описание"><input style={s.fld} className="fld" placeholder={isInc?"Например, предоплата":"Например, аренда зала"} value={txDraft.name} onChange={e=>setT("name",e.target.value)}/></Field>
+          <Field label="Категория">
+            <div style={{display:"flex",flexWrap:"wrap",gap:7}}>{cats.map(o=><button key={o} style={{...s.pick,...(txDraft.category===o?s.pickOn:{})}} className="press" onClick={()=>setT("category",txDraft.category===o?"":o)}>{o}</button>)}</div>
+            <input style={{...s.fld,marginTop:9}} className="fld" placeholder="Своя категория" value={cats.includes(txDraft.category)?"":txDraft.category} onChange={e=>setT("category",e.target.value)}/>
+          </Field>
+          <Field label="Дата"><input type="date" style={s.fld} className="fld" value={txDraft.date} onChange={e=>setT("date",e.target.value)}/></Field>
+          <Field label="Мероприятие" hint="Если выбрать, запись появится в карточке этого заказа">
+            <select style={s.fld} className="fld" value={txDraft.eventId||""} onChange={e=>setT("eventId",e.target.value)}>
+              <option value="">Без привязки</option>
+              {evOptions.map(ev=><option key={ev.id} value={ev.id}>{ev.date?formatDate(ev.date)+" · ":""}{ev.title}</option>)}
+            </select>
+          </Field>
+          {!txDraft._new&&<button style={s.dangerLink} className="press" onClick={()=>setTxDel(true)}>Удалить запись</button>}
+        </div>
+        {txDel&&<Sheet title="Удалить запись?" sub="Запись удалится из финансов и из карточки заказа, если она к нему привязана." cancel={()=>setTxDel(false)} confirm={deleteTx} confirmLabel="Удалить" confirmColor={C.red}/>}
+      </div>
+    );
+  }
+
+  if(view===V.ASSET&&assetDraft){
+    const isL=assetDraft.kind==="liability";
+    const cats=isL?LIAB_CATS:ASSET_CATS;
+    const setA=(f,v)=>setAssetDraft(d=>({...d,[f]:v}));
+    const ph={"Счета и наличные":"Карта Тинькофф","Вклады":"Вклад в Сбере","Акции и облигации":"ОФЗ 26238","Дал в долг":"Долг Ивану","Кредиты":"Кредит на машину","Мои долги":"Долг Сергею"}[assetDraft.category]||"Название";
+    const amountLabel=isL?"Сколько осталось вернуть, ₽":assetDraft.category==="Акции и облигации"?"Текущая стоимость, ₽":assetDraft.category==="Дал в долг"?"Сколько должны вернуть, ₽":"Сумма, ₽";
+    return (
+      <div style={s.screen}>
+        <TopBar left={<BackBtn onClick={closeAsset}/>} title={assetDraft._new?(isL?"Новый пассив":"Новый актив"):assetDraft.name||"Позиция"}
+          right={<button style={{...s.saveBtn,opacity:assetDraft.name.trim()&&!saving?1:0.35}} className="press" onClick={saveAsset}>{saving?"…":"Готово"}</button>}/>
+        {error&&<Err error={error} clear={()=>setError(null)}/>}
+        <div style={{flex:1,overflowY:"auto",padding:"16px 16px 48px"}}>
+          <div style={{...s.seg,marginBottom:16}}>{[["asset","Актив"],["liability","Пассив"]].map(([k,l])=>(
+            <button key={k} className="press" style={{...s.segBtn,...(assetDraft.kind===k?s.segOn:{})}}
+              onClick={()=>setAssetDraft(d=>({...d,kind:k,category:(k==="liability"?LIAB_CATS:ASSET_CATS).includes(d.category)?d.category:(k==="liability"?LIAB_CATS:ASSET_CATS)[0]}))}>{l}</button>))}</div>
+          <Field label="Категория">
+            <div style={{display:"flex",flexWrap:"wrap",gap:7}}>{cats.map(o=><button key={o} style={{...s.pick,...(assetDraft.category===o?s.pickOn:{})}} className="press" onClick={()=>setA("category",o)}>{o}</button>)}</div>
+          </Field>
+          <Field label="Название"><input style={s.fld} className="fld" placeholder={ph} value={assetDraft.name} autoFocus={!!assetDraft._new} onChange={e=>setA("name",e.target.value)}/></Field>
+          <Field label={amountLabel}><input style={s.fld} className="fld" placeholder="100 000" inputMode="numeric" value={assetDraft.amount} onChange={e=>setA("amount",formatMoney(e.target.value))}/></Field>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Field label="Ставка, % годовых"><input style={s.fld} className="fld" placeholder="—" inputMode="decimal" value={assetDraft.rate} onChange={e=>setA("rate",e.target.value.replace(/[^\d.,]/g,"").replace(",","."))}/></Field>
+            <Field label={isL||assetDraft.category==="Дал в долг"?"Вернуть до":"Срок до"}><input type="date" style={s.fld} className="fld" value={assetDraft.dueDate} onChange={e=>setA("dueDate",e.target.value)}/></Field>
+          </div>
+          <Field label="Заметка"><textarea style={{...s.fld,minHeight:80,resize:"vertical",lineHeight:1.5}} className="fld" placeholder="Банк, условия, количество бумаг, контакты…" value={assetDraft.note} onChange={e=>setA("note",e.target.value)}/></Field>
+          {assetDraft.updatedAt&&<div style={{fontSize:12,color:C.textMut,marginTop:-6,marginBottom:14}}>Последнее обновление: {formatDate(assetDraft.updatedAt.slice(0,10))}</div>}
+          {!assetDraft._new&&<button style={s.dangerLink} className="press" onClick={()=>setAssetDel(true)}>Удалить позицию</button>}
+        </div>
+        {assetDel&&<Sheet title="Удалить позицию?" sub="Она пропадёт из активов и пассивов." cancel={()=>setAssetDel(false)} confirm={deleteAsset} confirmLabel="Удалить" confirmColor={C.red}/>}
+      </div>
+    );
+  }
+
   if(view===V.EVENT&&activeEvent) {
     const rem=remaining(activeEvent), pr=profit(activeEvent), isArc=activeEvent.archived;
     return (
@@ -581,25 +884,24 @@ function App() {
             </div>
           )}
 
-          {activeEvent.totalCost&&(
-            <div style={s.moneyBlock}>
-              <div style={s.moneyRow}><span style={s.moneyKey}>Стоимость</span><span style={s.moneyVal}>{activeEvent.totalCost} ₽</span></div>
-              {activeEvent.paidCost&&<div style={s.moneyRow}><span style={s.moneyKey}>Оплачено</span><span style={{...s.moneyVal,color:C.green}}>{activeEvent.paidCost} ₽</span></div>}
-              <div style={s.moneyRow}><span style={s.moneyKey}>Остаток</span><span style={{...s.moneyVal,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
-              {activeEvent.expenses&&<div style={s.moneyRow}><span style={s.moneyKey}>Расходы</span><span style={{...s.moneyVal,color:C.textSub}}>{activeEvent.expenses} ₽</span></div>}
-              {legacyItems(activeEvent).length>0&&(
-                <div style={{padding:"0 0 8px 12px",borderLeft:`2px solid ${C.line}`,margin:"2px 0 6px"}}>
-                  {legacyItems(activeEvent).map((it,i)=>(
-                    <div key={i} style={{display:"flex",justifyContent:"space-between",gap:10,padding:"3px 0"}}>
-                      <span style={{fontSize:12.5,color:C.textSub}}>{it.name||"Без названия"}</span>
-                      <span style={{fontSize:12.5,color:C.textSub,fontWeight:600,whiteSpace:"nowrap"}}>{fmt(parseMoney(it.amount))} ₽</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {activeEvent.expenses&&<div style={{...s.moneyRow,borderTop:`1px solid ${C.line}`,paddingTop:10,marginTop:2}}><span style={{...s.moneyKey,fontWeight:700,color:C.text}}>Прибыль</span><span style={{...s.moneyVal,color:C.brass,fontWeight:800}}>{fmt(pr)} ₽</span></div>}
+          <div style={s.moneyBlock}>
+            {activeEvent.totalCost&&<div style={s.moneyRow}><span style={s.moneyKey}>Стоимость</span><span style={s.moneyVal}>{activeEvent.totalCost} ₽</span></div>}
+            <div style={s.moneyRow}><span style={s.moneyKey}>Оплачено</span><span style={{...s.moneyVal,color:C.green}}>{fmt(parseMoney(activeEvent.paidCost))} ₽</span></div>
+            {activeEvent.totalCost&&<div style={s.moneyRow}><span style={s.moneyKey}>Остаток</span><span style={{...s.moneyVal,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>}
+            <div style={s.moneyRow}><span style={s.moneyKey}>Расходы</span><span style={{...s.moneyVal,color:C.textSub}}>{fmt(parseMoney(activeEvent.expenses))} ₽</span></div>
+            <div style={{...s.moneyRow,borderTop:`1px solid ${C.line}`,paddingTop:10,marginTop:4}}><span style={{...s.moneyKey,fontWeight:700,color:C.text}}>Прибыль</span><span style={{...s.moneyVal,color:C.brass,fontWeight:800}}>{fmt(pr)} ₽</span></div>
+          </div>
+
+          {[["income","Оплаты",activeEvent.incomeTxs||[],"＋ Добавить оплату"],["expense","Расходы",activeEvent.expenseTxs||[],"＋ Добавить расход"]].map(([type,title,list,add])=>(
+            <div key={type} style={{...s.panel,padding:"14px 16px 4px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                <span style={{...s.panelTitle,marginBottom:4}}>{title}</span>
+                {list.length>0&&<span style={{fontSize:13,fontWeight:700,color:type==="income"?C.green:C.text}}>{fmt(sumTx(list))} ₽</span>}
+              </div>
+              {list.map(t=><TxRow key={t.id} t={t} meta={[formatDate(t.date),t.category].filter(Boolean).join(" · ")} onClick={()=>openTx(t,V.EVENT)}/>)}
+              <button style={{...s.expAdd,padding:"12px 0"}} className="press" onClick={()=>newTx(type,activeEvent.id,V.EVENT)}>{add}</button>
             </div>
-          )}
+          ))}
 
           <div style={s.notesBtn} className="card-press" onClick={()=>setView(V.NOTES)}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -638,31 +940,8 @@ function App() {
           </Field>
           <Field label="Имя заказчика"><input style={s.fld} className="fld" placeholder="Анна Иванова" value={draft.clientName} onChange={e=>setField("clientName",e.target.value)}/></Field>
           <Field label="Телефон"><input style={s.fld} className="fld" placeholder="+7 (___) ___-__-__" inputMode="tel" value={draft.clientPhone} onChange={e=>setField("clientPhone",formatPhone(e.target.value))}/></Field>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            <Field label="Стоимость, ₽"><input style={s.fld} className="fld" placeholder="50 000" inputMode="numeric" value={draft.totalCost} onChange={e=>setField("totalCost",formatMoney(e.target.value))}/></Field>
-            <Field label="Оплачено, ₽"><input style={s.fld} className="fld" placeholder="25 000" inputMode="numeric" value={draft.paidCost} onChange={e=>setField("paidCost",formatMoney(e.target.value))}/></Field>
-          </div>
-          <Field label="Расходы">
-            <div style={s.expList}>
-              {(draft.expenseItems||[]).length===0&&<div style={{fontSize:13,color:C.textMut,padding:"12px 14px"}}>Расходов пока нет</div>}
-              {(draft.expenseItems||[]).map((it,i)=>(
-                <div key={i} style={s.expItemRow}>
-                  <input style={s.expName} placeholder="Например, аренда зала" value={it.name} onChange={e=>setItem(i,"name",e.target.value)}/>
-                  <input style={s.expAmt} placeholder="0" inputMode="numeric" value={it.amount} onChange={e=>setItem(i,"amount",formatMoney(e.target.value))}/>
-                  <span style={{fontSize:13,color:C.textMut}}>₽</span>
-                  <button style={s.expDel} className="press" onClick={()=>removeItem(i)}>×</button>
-                </div>
-              ))}
-              <button style={s.expAdd} className="press" onClick={addItem}>＋ Добавить расход</button>
-            </div>
-            {(draft.expenseItems||[]).length>0&&<div style={{display:"flex",justifyContent:"space-between",marginTop:8,padding:"0 2px"}}><span style={{fontSize:13,color:C.textSub}}>Итого расходов</span><span style={{fontSize:14,fontWeight:700,color:C.text}}>{fmt(itemsTotal(draft.expenseItems))} ₽</span></div>}
-          </Field>
-          {draft.totalCost&&(
-            <div style={s.formSummary}>
-              <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:C.textSub}}>Остаток к оплате</span><span style={{fontSize:14,fontWeight:700,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
-              {draft.expenses&&<div style={{display:"flex",justifyContent:"space-between",marginTop:8}}><span style={{fontSize:13,color:C.textSub}}>Прибыль</span><span style={{fontSize:14,fontWeight:700,color:C.brass}}>{fmt(pr)} ₽</span></div>}
-            </div>
-          )}
+          <Field label="Стоимость, ₽" hint="Сумма, о которой договорились на встрече"><input style={s.fld} className="fld" placeholder="50 000" inputMode="numeric" value={draft.totalCost} onChange={e=>setField("totalCost",formatMoney(e.target.value))}/></Field>
+          <div style={s.formSummary}><div style={{fontSize:13,color:C.textSub,lineHeight:1.55}}>Оплаты и расходы добавляются в карточке заказа после сохранения — они сразу попадают в раздел «Финансы».</div></div>
         </div>
       </div>
     );
@@ -733,6 +1012,19 @@ const s = {
   expDel:{width:30,height:30,border:"none",background:"transparent",color:C.textMut,fontSize:20,cursor:"pointer",lineHeight:1,flexShrink:0},
   expAdd:{width:"100%",border:"none",background:"transparent",color:C.brass,fontWeight:700,fontSize:13.5,fontFamily:"inherit",padding:"12px 14px",textAlign:"left",cursor:"pointer"},
   exportBtn:{background:C.surface,border:`1px solid ${C.line2}`,color:C.text,padding:"8px 12px",fontWeight:700,fontSize:12.5,fontFamily:"inherit",borderRadius:10,cursor:"pointer",whiteSpace:"nowrap"},
+  seg:{display:"flex",background:C.bgAlt,borderRadius:12,padding:3,gap:3},
+  segBtn:{flex:1,border:"none",background:"transparent",color:C.textSub,fontWeight:600,fontSize:13.5,fontFamily:"inherit",padding:"9px 6px",borderRadius:9,cursor:"pointer"},
+  segOn:{background:C.surface,color:C.text,fontWeight:700,boxShadow:"0 1px 3px rgba(0,0,0,0.08)"},
+  monthNav:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 0 14px"},
+  groupHead:{fontSize:11.5,fontWeight:700,color:C.textSub,letterSpacing:0.3,textTransform:"uppercase",margin:"16px 2px 8px"},
+  txRow:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:`1px solid ${C.line}`,cursor:"pointer"},
+  txName:{fontSize:14.5,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+  txMeta:{fontSize:12,color:C.textSub,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+  txAmt:{fontSize:15,fontWeight:700,whiteSpace:"nowrap",letterSpacing:-0.2},
+  amountWrap:{display:"flex",alignItems:"baseline",justifyContent:"center",gap:6,padding:"10px 0 22px"},
+  amountInput:{width:"100%",maxWidth:240,border:"none",outline:"none",background:"transparent",fontSize:40,fontWeight:800,textAlign:"right",fontFamily:"inherit",letterSpacing:-1},
+  amountCur:{fontSize:28,fontWeight:700,color:C.textMut},
+  dangerLink:{width:"100%",background:"none",border:`1px solid ${C.redBg}`,color:C.red,fontWeight:700,fontSize:14,fontFamily:"inherit",padding:"13px",borderRadius:12,cursor:"pointer",marginTop:8},
   moneyBlock:{background:C.surface,border:`1px solid ${C.line}`,borderRadius:16,padding:"14px 16px",marginBottom:12},
   moneyRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0"},
   moneyKey:{fontSize:13.5,color:C.textSub},
