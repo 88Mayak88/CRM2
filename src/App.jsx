@@ -39,13 +39,42 @@ function formatPhone(val) {
 }
 function formatMoney(val) { const n=val.replace(/\D/g,""); return n?n.replace(/\B(?=(\d{3})+(?!\d))/g," "):""; }
 function parseMoney(str)  { return parseInt((str||"").replace(/\s/g,""),10)||0; }
-function remaining(ev)    { return parseMoney(ev.totalCost)-parseMoney(ev.paidCost); }
-function profit(ev)       { return parseMoney(ev.totalCost)-parseMoney(ev.expenses); }
+function remaining(ev)    { return Math.max(0, parseMoney(ev.totalCost)-parseMoney(ev.paidCost)); }
+function earned(ev)       { return Math.max(parseMoney(ev.totalCost), parseMoney(ev.paidCost)); }
+function profit(ev)       { return earned(ev)-parseMoney(ev.expenses); }
+function itemsTotal(items){ return (items||[]).reduce((s,i)=>s+parseMoney(i.amount),0); }
+function legacyItems(ev){
+  if(ev.expenseItems&&ev.expenseItems.length) return ev.expenseItems;
+  if(parseMoney(ev.expenses)>0) return [{name:ev.expensesNote||"Расходы",amount:ev.expenses}];
+  return [];
+}
+function csvCell(v){ const s=String(v??""); return /[;"\n\r]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
+async function exportEvents(events){
+  const head=["Дата","Название","Статус","Заказчик","Телефон","Откуда клиент","Стоимость","Оплачено","Остаток","Дата предоплаты","Расходы","Расшифровка расходов","Прибыль","Заметки"];
+  const rows=[...events].sort((a,b)=>(a.date||"").localeCompare(b.date||"")).map(ev=>{
+    const items=legacyItems(ev);
+    return [
+      formatDate(ev.date), ev.title, ev.archived?"Архив":"В работе", ev.clientName, ev.clientPhone, ev.source,
+      parseMoney(ev.totalCost), parseMoney(ev.paidCost), remaining(ev), formatDate(ev.prepayDate),
+      parseMoney(ev.expenses), items.map(i=>`${i.name||"Без названия"} — ${parseMoney(i.amount)}`).join(", "),
+      profit(ev), ev.notes||""
+    ];
+  });
+  const csv="\uFEFF"+[head,...rows].map(r=>r.map(csvCell).join(";")).join("\r\n");
+  const name=`host-crm-${new Date().toISOString().slice(0,10)}.csv`;
+  const file=new File([csv],name,{type:"text/csv;charset=utf-8"});
+  if(navigator.canShare&&navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file],title:"Выгрузка заказов"}); return; }catch(e){ if(e.name==="AbortError") return; }
+  }
+  const url=URL.createObjectURL(file);
+  const a=document.createElement("a"); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
 function formatDate(d)    { if(!d) return ""; const [y,m,day]=d.split("-"); return `${day}.${m}.${y}`; }
 function fmt(n)           { return n.toLocaleString("ru"); }
 
 const emptyEvent = () => ({ id:Date.now().toString(), title:"", date:"", prepayDate:"", source:"",
-  clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", expensesNote:"", notes:"",
+  clientName:"", clientPhone:"", totalCost:"", paidCost:"", expenses:"", expensesNote:"", expenseItems:[], notes:"",
   createdAt:new Date().toISOString(), archived:false });
 
 const V = { LIST:"list", EVENT:"event", NOTES:"notes", FORM:"form", DASH:"dash", ARCHIVE:"archive", CLIENTS:"clients", CAL:"cal", MONTH:"month" };
@@ -182,12 +211,12 @@ function Stat({ label, value, tone, big }) {
 
 function Dashboard({ events, onMonthClick }) {
   const all = events; // ВСЕ заказы
-  const revenue = all.reduce((s,e)=>s+parseMoney(e.totalCost),0);
+  const revenue = all.reduce((s,e)=>s+earned(e),0);
   const expenses= all.reduce((s,e)=>s+parseMoney(e.expenses),0);
   const prof    = revenue - expenses;
   const paid    = all.reduce((s,e)=>s+parseMoney(e.paidCost),0);
-  const owed     = revenue - paid;
-  const withPrice = all.filter(e=>parseMoney(e.totalCost)>0);
+  const owed     = all.reduce((s,e)=>s+remaining(e),0);
+  const withPrice = all.filter(e=>earned(e)>0);
   const avg     = withPrice.length ? Math.round(revenue/withPrice.length) : 0;
   const margin  = revenue ? Math.round(prof/revenue*100) : 0;
 
@@ -198,7 +227,7 @@ function Dashboard({ events, onMonthClick }) {
     const [y,m]=ev.date.split("-");
     const k=`${y}-${m}`;
     if(!byMonth[k]) byMonth[k]={key:k,name:MONTHS_RU[parseInt(m)-1],year:y,rev:0,exp:0,prof:0,count:0};
-    byMonth[k].rev  += parseMoney(ev.totalCost);
+    byMonth[k].rev  += earned(ev);
     byMonth[k].exp  += parseMoney(ev.expenses);
     byMonth[k].prof += profit(ev);
     byMonth[k].count+= 1;
@@ -433,14 +462,17 @@ function App() {
 
   const openEvent=(ev,from)=>{ setActiveId(ev.id); if(from) setOrigin(from); setView(V.EVENT); };
   const openNew=()=>{ setDraft(emptyEvent()); setView(V.FORM); };
-  const openEdit=()=>{ setDraft({...emptyEvent(),...activeEvent}); setView(V.FORM); };
+  const openEdit=()=>{ const items=legacyItems(activeEvent).map(i=>({...i})); setDraft({...emptyEvent(),...activeEvent,expenseItems:items}); setView(V.FORM); };
 
   const saveForm=async()=>{
     if(!draft.title.trim()) return; setSaving(true);
-    try{ await dbUpsert(draft);
+    const items=(draft.expenseItems||[]).filter(i=>(i.name||"").trim()||parseMoney(i.amount)>0);
+    const tot=itemsTotal(items);
+    const clean={...draft,expenseItems:items,expenses:tot?formatMoney(String(tot)):"",expensesNote:""};
+    try{ await dbUpsert(clean);
       const exists=events.find(e=>e.id===draft.id);
-      setEvents(exists?events.map(e=>e.id===draft.id?draft:e):[draft,...events]);
-      setActiveId(draft.id); setView(V.EVENT); setDraft(null);
+      setEvents(exists?events.map(e=>e.id===clean.id?clean:e):[clean,...events]);
+      setActiveId(clean.id); setView(V.EVENT); setDraft(null);
     }catch(e){ setError("Ошибка: "+e.message); }finally{ setSaving(false); }
   };
   const cancelForm=()=>{ setView(activeId?V.EVENT:V.LIST); setDraft(null); };
@@ -448,6 +480,11 @@ function App() {
   const doArchive=async()=>{ if(!activeEvent) return; const u={...activeEvent,archived:!activeEvent.archived}; try{ await dbUpsert(u); setEvents(events.map(e=>e.id===activeId?u:e)); setArc(false); setView(u.archived?V.ARCHIVE:V.LIST);}catch(e){setError("Ошибка: "+e.message);} };
   const updateNotes=(val)=>{ const upd=events.map(e=>e.id===activeId?{...e,notes:val}:e); setEvents(upd); clearTimeout(notesTimer.current); notesTimer.current=setTimeout(async()=>{ const ev=upd.find(e=>e.id===activeId); if(ev){try{await dbUpsert(ev);}catch{}} },1500); };
   const setField=(f,v)=>setDraft(d=>({...d,[f]:v}));
+  const setItem=(i,f,v)=>setDraft(d=>{ const items=[...(d.expenseItems||[])]; items[i]={...items[i],[f]:v}; return {...d,expenseItems:items,expenses:formatMoney(String(itemsTotal(items)))}; });
+  const addItem=()=>setDraft(d=>({...d,expenseItems:[...(d.expenseItems||[]),{name:"",amount:""}]}));
+  const removeItem=(i)=>setDraft(d=>{ const items=(d.expenseItems||[]).filter((_,k)=>k!==i); return {...d,expenseItems:items,expenses:formatMoney(String(itemsTotal(items)))}; });
+  const [exporting,setExporting]=useState(false);
+  const doExport=async()=>{ setExporting(true); try{ await exportEvents(events); }catch(e){ setError("Не удалось выгрузить: "+e.message); } finally{ setExporting(false); } };
   const onTab=(t)=>{ setActiveId(null); setDraft(null); setView(t); };
 
   if(loading) return (
@@ -490,14 +527,14 @@ function App() {
     <div style={s.screen}><TopBar title="Календарь"/><Calendar events={events} onEventClick={ev=>{setActiveId(ev.id);setOrigin(V.CAL);setView(V.EVENT);}}/><TabBar view={view} onTab={onTab}/></div>
   );
   if(view===V.DASH) return (
-    <div style={s.screen}><TopBar title="Аналитика" sub="по всем заказам"/><Dashboard events={events} onMonthClick={(k)=>{setMonthKey(k);setView(V.MONTH);}}/><TabBar view={view} onTab={onTab}/></div>
+    <div style={s.screen}><TopBar title="Аналитика" sub="по всем заказам" right={<button style={s.exportBtn} className="press" onClick={doExport} disabled={exporting}>{exporting?"…":"Выгрузить"}</button>}/><Dashboard events={events} onMonthClick={(k)=>{setMonthKey(k);setView(V.MONTH);}}/><TabBar view={view} onTab={onTab}/></div>
   );
 
   if(view===V.MONTH&&monthKey) {
     const [my,mm]=monthKey.split("-");
     const monthName=MONTHS_RU[parseInt(mm)-1];
     const monthEvents=[...events].filter(e=>(e.date||"").startsWith(monthKey)).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-    const mRev=monthEvents.reduce((s,e)=>s+parseMoney(e.totalCost),0);
+    const mRev=monthEvents.reduce((s,e)=>s+earned(e),0);
     const mExp=monthEvents.reduce((s,e)=>s+parseMoney(e.expenses),0);
     const mProf=monthEvents.reduce((s,e)=>s+profit(e),0);
     return (
@@ -550,7 +587,16 @@ function App() {
               {activeEvent.paidCost&&<div style={s.moneyRow}><span style={s.moneyKey}>Оплачено</span><span style={{...s.moneyVal,color:C.green}}>{activeEvent.paidCost} ₽</span></div>}
               <div style={s.moneyRow}><span style={s.moneyKey}>Остаток</span><span style={{...s.moneyVal,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
               {activeEvent.expenses&&<div style={s.moneyRow}><span style={s.moneyKey}>Расходы</span><span style={{...s.moneyVal,color:C.textSub}}>{activeEvent.expenses} ₽</span></div>}
-              {activeEvent.expensesNote&&<div style={s.expNote}>{activeEvent.expensesNote}</div>}
+              {legacyItems(activeEvent).length>0&&(
+                <div style={{padding:"0 0 8px 12px",borderLeft:`2px solid ${C.line}`,margin:"2px 0 6px"}}>
+                  {legacyItems(activeEvent).map((it,i)=>(
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",gap:10,padding:"3px 0"}}>
+                      <span style={{fontSize:12.5,color:C.textSub}}>{it.name||"Без названия"}</span>
+                      <span style={{fontSize:12.5,color:C.textSub,fontWeight:600,whiteSpace:"nowrap"}}>{fmt(parseMoney(it.amount))} ₽</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {activeEvent.expenses&&<div style={{...s.moneyRow,borderTop:`1px solid ${C.line}`,paddingTop:10,marginTop:2}}><span style={{...s.moneyKey,fontWeight:700,color:C.text}}>Прибыль</span><span style={{...s.moneyVal,color:C.brass,fontWeight:800}}>{fmt(pr)} ₽</span></div>}
             </div>
           )}
@@ -596,8 +642,21 @@ function App() {
             <Field label="Стоимость, ₽"><input style={s.fld} className="fld" placeholder="50 000" inputMode="numeric" value={draft.totalCost} onChange={e=>setField("totalCost",formatMoney(e.target.value))}/></Field>
             <Field label="Оплачено, ₽"><input style={s.fld} className="fld" placeholder="25 000" inputMode="numeric" value={draft.paidCost} onChange={e=>setField("paidCost",formatMoney(e.target.value))}/></Field>
           </div>
-          <Field label="Расходы, ₽" hint="Аренда, реквизит, помощники — для расчёта прибыли"><input style={s.fld} className="fld" placeholder="10 000" inputMode="numeric" value={draft.expenses} onChange={e=>setField("expenses",formatMoney(e.target.value))}/></Field>
-          <Field label="На что расходы" hint="Например: аренда зала 5000, помощник 3000, реквизит 2000"><textarea style={{...s.fld,minHeight:70,resize:"vertical",lineHeight:1.5}} className="fld" placeholder="Опиши, на что потрачены деньги" value={draft.expensesNote} onChange={e=>setField("expensesNote",e.target.value)}/></Field>
+          <Field label="Расходы">
+            <div style={s.expList}>
+              {(draft.expenseItems||[]).length===0&&<div style={{fontSize:13,color:C.textMut,padding:"12px 14px"}}>Расходов пока нет</div>}
+              {(draft.expenseItems||[]).map((it,i)=>(
+                <div key={i} style={s.expItemRow}>
+                  <input style={s.expName} placeholder="Например, аренда зала" value={it.name} onChange={e=>setItem(i,"name",e.target.value)}/>
+                  <input style={s.expAmt} placeholder="0" inputMode="numeric" value={it.amount} onChange={e=>setItem(i,"amount",formatMoney(e.target.value))}/>
+                  <span style={{fontSize:13,color:C.textMut}}>₽</span>
+                  <button style={s.expDel} className="press" onClick={()=>removeItem(i)}>×</button>
+                </div>
+              ))}
+              <button style={s.expAdd} className="press" onClick={addItem}>＋ Добавить расход</button>
+            </div>
+            {(draft.expenseItems||[]).length>0&&<div style={{display:"flex",justifyContent:"space-between",marginTop:8,padding:"0 2px"}}><span style={{fontSize:13,color:C.textSub}}>Итого расходов</span><span style={{fontSize:14,fontWeight:700,color:C.text}}>{fmt(itemsTotal(draft.expenseItems))} ₽</span></div>}
+          </Field>
           {draft.totalCost&&(
             <div style={s.formSummary}>
               <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:13,color:C.textSub}}>Остаток к оплате</span><span style={{fontSize:14,fontWeight:700,color:rem>0?C.red:C.green}}>{rem>0?`${fmt(rem)} ₽`:"оплачено"}</span></div>
@@ -667,6 +726,13 @@ const s = {
   detailKey:{fontSize:13,color:C.textSub},
   detailVal:{fontSize:14,color:C.text,fontWeight:600,textAlign:"right"},
   expNote:{fontSize:12.5,color:C.textSub,lineHeight:1.55,padding:"2px 0 8px",whiteSpace:"pre-wrap"},
+  expList:{background:C.surface,border:`1px solid ${C.line2}`,borderRadius:12,overflow:"hidden"},
+  expItemRow:{display:"flex",alignItems:"center",gap:8,padding:"6px 8px 6px 12px",borderBottom:`1px solid ${C.line}`},
+  expName:{flex:1,minWidth:0,border:"none",outline:"none",background:"transparent",fontSize:15,fontFamily:"inherit",color:C.text,padding:"8px 0"},
+  expAmt:{width:84,border:"none",outline:"none",background:C.bgAlt,borderRadius:8,fontSize:15,fontFamily:"inherit",color:C.text,padding:"8px 10px",textAlign:"right"},
+  expDel:{width:30,height:30,border:"none",background:"transparent",color:C.textMut,fontSize:20,cursor:"pointer",lineHeight:1,flexShrink:0},
+  expAdd:{width:"100%",border:"none",background:"transparent",color:C.brass,fontWeight:700,fontSize:13.5,fontFamily:"inherit",padding:"12px 14px",textAlign:"left",cursor:"pointer"},
+  exportBtn:{background:C.surface,border:`1px solid ${C.line2}`,color:C.text,padding:"8px 12px",fontWeight:700,fontSize:12.5,fontFamily:"inherit",borderRadius:10,cursor:"pointer",whiteSpace:"nowrap"},
   moneyBlock:{background:C.surface,border:`1px solid ${C.line}`,borderRadius:16,padding:"14px 16px",marginBottom:12},
   moneyRow:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0"},
   moneyKey:{fontSize:13.5,color:C.textSub},
