@@ -432,6 +432,141 @@ function Dashboard({ events, onMonthClick }) {
   );
 }
 
+// ── finance analytics ──
+const WORK_CATS   = ["Мероприятия","Реквизит","Реклама"];   // расходы, которые идут на работу, а не на жизнь
+const LIQUID_CATS = ["Счета и наличные","Вклады"];           // деньги, доступные сразу — из них считается подушка
+const isWorkTx = t => !!t.eventId || WORK_CATS.includes(t.category);
+function lastMonths(n){ // n полных месяцев до текущего, от старых к новым
+  const d=new Date(), out=[];
+  for(let i=n;i>=1;i--){ const x=new Date(d.getFullYear(),d.getMonth()-i,1); out.push(`${x.getFullYear()}-${pad2(x.getMonth()+1)}`); }
+  return out;
+}
+function Bar({ value, max, color }){
+  return <div style={{height:6,background:C.bgAlt,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${max?Math.min(100,Math.round(value/max*100)):0}%`,background:color,borderRadius:3}}/></div>;
+}
+function Row({ label, value, tone, hint }){
+  const vc=tone==="green"?C.green:tone==="red"?C.red:tone==="brass"?C.brass:C.text;
+  return (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"8px 0",borderTop:`1px solid ${C.line}`}}>
+      <span style={{fontSize:13,color:C.textSub}}>{label}{hint&&<span style={{color:C.textMut}}> · {hint}</span>}</span>
+      <span style={{fontSize:14,fontWeight:700,color:vc}}>{value}</span>
+    </div>
+  );
+}
+
+function FinanceAnalytics({ txs, assets }) {
+  const [period,setPeriod]=useState(3);
+  const keys=lastMonths(period);
+  const inPeriod=t=>keys.includes((t.date||"").slice(0,7));
+  const months=keys.map(k=>{
+    const list=txs.filter(t=>(t.date||"").startsWith(k)), exp=list.filter(t=>t.type==="expense");
+    const work=sumTx(exp.filter(isWorkTx)), all=sumTx(exp);
+    return {k, inc:sumTx(list.filter(t=>t.type==="income")), exp:all, work, personal:all-work};
+  });
+  const tot=f=>months.reduce((s,m)=>s+m[f],0);
+  const tInc=tot("inc"), tExp=tot("exp"), tWork=tot("work"), tPers=tot("personal");
+  const avg=v=>Math.round(v/period);
+  const saved=tInc-tExp;
+  const rate=tInc?Math.round(saved/tInc*100):null;
+  const rateTone=rate===null?null:rate>=20?"green":rate>=0?"brass":"red";
+  const noIncome=months.filter(m=>m.inc===0).length;
+  const maxM=Math.max(...months.map(m=>Math.max(m.inc,m.exp)),1);
+
+  const byCat={};
+  txs.filter(t=>t.type==="expense"&&inPeriod(t)&&!isWorkTx(t)).forEach(t=>{ const k=t.category||"Без категории"; byCat[k]=(byCat[k]||0)+parseMoney(t.amount); });
+  const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+
+  const A=assets.filter(a=>a.kind!=="liability"), L=assets.filter(a=>a.kind==="liability");
+  const ta=sumAmt(A), tl=sumAmt(L);
+  const liquid=sumAmt(A.filter(a=>LIQUID_CATS.includes(a.category)));
+  const lent=sumAmt(A.filter(a=>a.category==="Дал в долг"));
+  const pAvg=avg(tPers), runway=pAvg?liquid/pAvg:null;
+  const aCats={}; A.forEach(a=>{ const k=a.category||"Прочее"; aCats[k]=(aCats[k]||0)+parseMoney(a.amount); });
+  const assetCats=Object.entries(aCats).sort((a,b)=>b[1]-a[1]);
+  const mLabel=k=>{ const [y,m]=k.split("-"); return `${MONTHS_SHORT[+m-1]} ${y.slice(2)}`; };
+
+  return (
+    <div style={{flex:1,overflowY:"auto",padding:"4px 16px 28px"}}>
+      <div style={{...s.seg,marginBottom:14}}>{[[3,"3 мес"],[6,"6 мес"],[12,"12 мес"]].map(([k,l])=>(
+        <button key={k} className="press" style={{...s.segBtn,...(period===k?s.segOn:{})}} onClick={()=>setPeriod(k)}>{l}</button>))}</div>
+
+      <div style={s.heroCard}>
+        <div style={{fontSize:11,letterSpacing:1.5,color:"rgba(255,255,255,0.55)",fontWeight:600,textTransform:"uppercase"}}>Норма сбережений</div>
+        <div style={{fontSize:38,fontWeight:800,color:rate===null?"#fff":rate>=20?"#9BD3AE":rate>=0?C.brass:"#E9A39C",letterSpacing:-1,marginTop:6,lineHeight:1}}>{rate===null?"—":`${rate}%`}</div>
+        <div style={{fontSize:12.5,color:"rgba(255,255,255,0.7)",marginTop:10,lineHeight:1.45}}>
+          {rate===null?"Нет доходов за период":<>{saved>=0?"Отложено":"Не хватило"} {fmt(Math.abs(saved))} ₽ из {fmt(tInc)} ₽ дохода за {mLabel(keys[0])} — {mLabel(keys[keys.length-1])}</>}
+        </div>
+      </div>
+      {noIncome>0&&<div style={{...s.panel,fontSize:12,color:C.textSub,lineHeight:1.5}}>В {noIncome} из {period} мес. нет доходов в CRM — средние и норма сбережений за этот период занижены.</div>}
+
+      <div style={s.statGrid}>
+        <Stat label="Средний доход / мес" value={`${fmt(avg(tInc))} ₽`} tone="green"/>
+        <Stat label="Средний расход / мес" value={`${fmt(avg(tExp))} ₽`}/>
+        <Stat label="Личные / мес" value={`${fmt(pAvg)} ₽`}/>
+        <Stat label="Рабочие / мес" value={`${fmt(avg(tWork))} ₽`}/>
+      </div>
+
+      <div style={s.panel}>
+        <div style={s.panelTitle}>Доходы и расходы по месяцам</div>
+        {months.map((m,i)=>{ const d=m.inc-m.exp, r=m.inc?Math.round(d/m.inc*100):null; return (
+          <div key={m.k} style={{padding:"10px 0",borderTop:i?`1px solid ${C.line}`:"none"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:7}}>
+              <span style={{fontSize:13.5,fontWeight:700,color:C.text}}>{mLabel(m.k)}</span>
+              <span style={{fontSize:12.5,fontWeight:700,color:d>=0?C.green:C.red}}>{d>=0?"+":"−"}{fmt(Math.abs(d))} ₽{r!==null&&<span style={{color:C.textMut,fontWeight:600}}> · {r}%</span>}</span>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"64px 1fr 84px",gap:"5px 8px",alignItems:"center",fontSize:11.5,color:C.textSub}}>
+              <span>Доход</span><Bar value={m.inc} max={maxM} color={C.green}/><span style={{textAlign:"right",fontWeight:600,color:C.text}}>{fmt(m.inc)} ₽</span>
+              <span>Расход</span><Bar value={m.exp} max={maxM} color={C.brass}/><span style={{textAlign:"right",fontWeight:600,color:C.text}}>{fmt(m.exp)} ₽</span>
+            </div>
+          </div>
+        ); })}
+      </div>
+
+      {cats.length>0&&(
+        <div style={s.panel}>
+          <div style={s.panelTitle}>Куда уходят личные деньги · в среднем за месяц</div>
+          {cats.map(([k,v])=>(
+            <div key={k} style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:5}}>
+                <span style={{color:C.text,fontWeight:600}}>{k}</span>
+                <span style={{color:C.textSub,fontWeight:600}}>{fmt(avg(v))} ₽ · {Math.round(v/tPers*100)}%</span>
+              </div>
+              <Bar value={v} max={cats[0][1]} color={C.brass}/>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={s.panel}>
+        <div style={s.panelTitle}>Капитал</div>
+        <div style={{fontSize:28,fontWeight:800,color:C.text,letterSpacing:-0.8,marginBottom:10}}>{fmt(ta-tl)} ₽</div>
+        <Row label="Активы" value={`${fmt(ta)} ₽`}/>
+        <Row label="Пассивы" value={`${fmt(tl)} ₽`} tone={tl?"red":null}/>
+        <Row label="Долговая нагрузка" hint="пассивы / активы" value={ta?`${Math.round(tl/ta*100)}%`:"—"} tone={ta&&tl/ta>0.5?"red":null}/>
+        <Row label="Свободные деньги" hint="счета и вклады" value={`${fmt(liquid)} ₽`}/>
+        <Row label="Подушка" hint="без доходов" value={runway===null?"—":`${runway.toFixed(1).replace(".",",")} мес`} tone={runway===null?null:runway>=6?"green":runway>=3?"brass":"red"}/>
+        {runway!==null&&<div style={{marginTop:2,marginBottom:6}}><Bar value={runway} max={6} color={runway>=6?C.green:runway>=3?C.brass:C.red}/><div style={{fontSize:11,color:C.textMut,marginTop:5}}>Цель — 6 месяцев личных расходов ({fmt(pAvg*6)} ₽)</div></div>}
+        {lent>0&&<Row label="Дал в долг" value={`${fmt(lent)} ₽`} tone="brass"/>}
+      </div>
+
+      {assetCats.length>0&&(
+        <div style={s.panel}>
+          <div style={s.panelTitle}>Структура активов</div>
+          {assetCats.map(([k,v])=>(
+            <div key={k} style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:5}}>
+                <span style={{color:C.text,fontWeight:600}}>{k}</span>
+                <span style={{color:C.textSub,fontWeight:600}}>{fmt(v)} ₽ · {Math.round(v/ta*100)}%</span>
+              </div>
+              <Bar value={v} max={assetCats[0][1]} color={C.ink}/>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── clients ──
 function Clients({ events }) {
   const [search,setSearch]=useState("");
@@ -576,6 +711,7 @@ function App() {
   const [txBack,setTxBack]=useState(V.FIN);
   const [txDel,setTxDel]=useState(false);
   const [finTab,setFinTab]=useState("income");
+  const [dashTab,setDashTab]=useState("orders");
   const [finMonth,setFinMonth]=useState(todayISO().slice(0,7));
   const [assetDraft,setAssetDraft]=useState(null);
   const [assetDel,setAssetDel]=useState(false);
@@ -712,7 +848,17 @@ function App() {
     <div style={s.screen}><TopBar title="Календарь"/><Calendar events={events} onEventClick={ev=>{setActiveId(ev.id);setOrigin(V.CAL);setView(V.EVENT);}}/><TabBar view={view} onTab={onTab}/></div>
   );
   if(view===V.DASH) return (
-    <div style={s.screen}><TopBar title="Аналитика" sub="по всем заказам" right={<button style={s.exportBtn} className="press" onClick={doExport} disabled={exporting}>{exporting?"…":"Выгрузить"}</button>}/><Dashboard events={events} onMonthClick={(k)=>{setMonthKey(k);setView(V.MONTH);}}/><TabBar view={view} onTab={onTab}/></div>
+    <div style={s.screen}>
+      <TopBar title="Аналитика" sub={dashTab==="orders"?"по всем заказам":"доходы, расходы, капитал"} right={dashTab==="orders"?<button style={s.exportBtn} className="press" onClick={doExport} disabled={exporting}>{exporting?"…":"Выгрузить"}</button>:null}/>
+      <div style={{padding:"12px 16px 4px",flexShrink:0}}>
+        <div style={s.seg}>{[["orders","Заказы"],["finance","Финансы"]].map(([k,l])=>(
+          <button key={k} className="press" style={{...s.segBtn,...(dashTab===k?s.segOn:{})}} onClick={()=>setDashTab(k)}>{l}</button>))}</div>
+      </div>
+      {dashTab==="orders"
+        ? <Dashboard events={events} onMonthClick={(k)=>{setMonthKey(k);setView(V.MONTH);}}/>
+        : <FinanceAnalytics txs={txs} assets={assets}/>}
+      <TabBar view={view} onTab={onTab}/>
+    </div>
   );
 
   if(view===V.MONTH&&monthKey) {
