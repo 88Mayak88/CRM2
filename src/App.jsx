@@ -214,12 +214,25 @@ function IconUsers({color}){return(<svg width="21" height="21" viewBox="0 0 24 2
 function IconChart({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
 function IconWallet({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="6" width="17" height="13" rx="2.5" stroke={color} strokeWidth="1.6"/><path d="M16 12.5h4.5M6.5 6l8-2.5 1.3 2.5" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><circle cx="16.5" cy="12.5" r="0.9" fill={color}/></svg>);}
 function IconDownload({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg>);}
-function TxRow({ t, meta, onClick }) {
+function TxRow({ t, meta, onClick, onRename }) {
   const inc=t.type==="income";
+  const label=t.name||t.category||(inc?"Доход":"Расход");
+  // название редактируется прямо в списке: Enter / тап мимо — сохранить, Esc — отменить
+  const [val,setVal]=useState(t.name||"");
+  const cancel=useRef(false);
+  useEffect(()=>setVal(t.name||""),[t.name]);
+  const commit=()=>{
+    if(cancel.current){ cancel.current=false; setVal(t.name||""); return; }
+    const v=val.trim(); if(v!==(t.name||"")) onRename(t,v);
+  };
   return (
     <div style={s.txRow} className="card-press" onClick={onClick}>
       <div style={{flex:1,minWidth:0}}>
-        <div style={s.txName}>{t.name||t.category||(inc?"Доход":"Расход")}</div>
+        {onRename
+          ? <input style={s.txNameEdit} className="inl" value={val} placeholder={label} enterKeyHint="done"
+              onClick={e=>e.stopPropagation()} onChange={e=>setVal(e.target.value)} onBlur={commit}
+              onKeyDown={e=>{ if(e.key==="Enter") e.currentTarget.blur(); if(e.key==="Escape"){ cancel.current=true; e.currentTarget.blur(); } }}/>
+          : <div style={s.txName}>{label}</div>}
         {meta&&<div style={s.txMeta}>{meta}</div>}
       </div>
       <div style={{...s.txAmt,color:inc?C.green:C.text}}>{inc?"+":"−"}{fmt(parseMoney(t.amount))} ₽</div>
@@ -637,6 +650,12 @@ function App() {
     try{ await saveDoc(TX,t); setTxs(txs.some(x=>x.id===t.id)?txs.map(x=>x.id===t.id?t:x):[...txs,t]); closeTx(); }
     catch(e){ setError("Ошибка: "+e.message); } finally{ setSaving(false); }
   };
+  const renameTx=async(t,name)=>{
+    const u={...t,name};
+    setTxs(prev=>prev.map(x=>x.id===t.id?u:x));
+    try{ await saveDoc(TX,u); }
+    catch(e){ setTxs(prev=>prev.map(x=>x.id===t.id?t:x)); setError("Не удалось переименовать: "+e.message); }
+  };
   const deleteTx=async()=>{ try{ await removeDoc(TX,txDraft.id); setTxs(txs.filter(x=>x.id!==txDraft.id)); setTxDel(false); closeTx(); }catch(e){ setError("Ошибка: "+e.message); } };
   const openAsset=(a)=>{ setAssetDraft({...a}); setAssetDel(false); setView(V.ASSET); };
   const newAsset=()=>openAsset({id:newId("a"),kind:"asset",category:"Вклады",name:"",amount:"",rate:"",dueDate:"",note:"",_new:true});
@@ -778,7 +797,7 @@ function App() {
                 <div style={s.groupHead}>{formatDate(g.date)}</div>
                 <div style={{...s.panel,padding:"2px 16px"}}>
                   {g.items.map(t=>{ const et=evTitle(t.eventId);
-                    return <TxRow key={t.id} t={t} meta={<>{t.category}{et&&<>{t.category?" · ":""}<span style={{color:C.brass}}>{et}</span></>}</>} onClick={()=>openTx(t,V.FIN)}/>; })}
+                    return <TxRow key={t.id} t={t} meta={<>{t.category}{et&&<>{t.category?" · ":""}<span style={{color:C.brass}}>{et}</span></>}</>} onClick={()=>openTx(t,V.FIN)} onRename={renameTx}/>; })}
                 </div>
               </div>
             ))}
@@ -1019,6 +1038,7 @@ const s = {
   groupHead:{fontSize:11.5,fontWeight:700,color:C.textSub,letterSpacing:0.3,textTransform:"uppercase",margin:"16px 2px 8px"},
   txRow:{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:`1px solid ${C.line}`,cursor:"pointer"},
   txName:{fontSize:14.5,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
+  txNameEdit:{display:"block",width:"100%",fontSize:14.5,fontWeight:600,color:C.text,fontFamily:"inherit",background:"transparent",border:"none",borderBottom:"1px solid transparent",outline:"none",padding:"1px 0",borderRadius:0,textOverflow:"ellipsis"},
   txMeta:{fontSize:12,color:C.textSub,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
   txAmt:{fontSize:15,fontWeight:700,whiteSpace:"nowrap",letterSpacing:-0.2},
   amountWrap:{display:"flex",alignItems:"baseline",justifyContent:"center",gap:6,padding:"10px 0 22px"},
@@ -1069,6 +1089,8 @@ export default function Root() {
         .card-press{transition:background .12s}
         .card-press:active{background:${C.bgAlt} !important}
         .fld:focus{border-color:${C.ink} !important}
+        .inl:focus{border-bottom-color:${C.brass} !important}
+        .inl::placeholder{color:${C.text}}
         input,textarea{font-size:16px}
         @media(min-width:400px){input,textarea{font-size:inherit}}
       `}</style>
