@@ -214,7 +214,7 @@ function IconUsers({color}){return(<svg width="21" height="21" viewBox="0 0 24 2
 function IconChart({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
 function IconWallet({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="6" width="17" height="13" rx="2.5" stroke={color} strokeWidth="1.6"/><path d="M16 12.5h4.5M6.5 6l8-2.5 1.3 2.5" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><circle cx="16.5" cy="12.5" r="0.9" fill={color}/></svg>);}
 function IconDownload({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg>);}
-function TxRow({ t, meta, onClick, onRename }) {
+function TxRow({ t, meta, onClick, onRename, showCat }) {
   const inc=t.type==="income";
   const label=t.name||t.category||(inc?"Доход":"Расход");
   // название редактируется прямо в списке: Enter / тап мимо — сохранить, Esc — отменить
@@ -235,6 +235,7 @@ function TxRow({ t, meta, onClick, onRename }) {
           : <div style={s.txName}>{label}</div>}
         {meta&&<div style={s.txMeta}>{meta}</div>}
       </div>
+      {showCat&&<div style={t.category?s.txCat:{...s.txCat,...s.txCatNone}} title={t.category||"Без категории"}>{t.category||"Без категории"}</div>}
       <div style={{...s.txAmt,color:inc?C.green:C.text}}>{inc?"+":"−"}{fmt(parseMoney(t.amount))} ₽</div>
     </div>
   );
@@ -943,7 +944,7 @@ function App() {
                 <div style={s.groupHead}>{formatDate(g.date)}</div>
                 <div style={{...s.panel,padding:"2px 16px"}}>
                   {g.items.map(t=>{ const et=evTitle(t.eventId);
-                    return <TxRow key={t.id} t={t} meta={<>{t.category}{et&&<>{t.category?" · ":""}<span style={{color:C.brass}}>{et}</span></>}</>} onClick={()=>openTx(t,V.FIN)} onRename={renameTx}/>; })}
+                    return <TxRow key={t.id} t={t} showCat meta={et&&<span style={{color:C.brass}}>{et}</span>} onClick={()=>openTx(t,V.FIN)} onRename={renameTx}/>; })}
                 </div>
               </div>
             ))}
@@ -1187,6 +1188,8 @@ const s = {
   txNameEdit:{display:"block",width:"100%",fontSize:14.5,fontWeight:600,color:C.text,fontFamily:"inherit",background:"transparent",border:"none",borderBottom:"1px solid transparent",outline:"none",padding:"1px 0",borderRadius:0,textOverflow:"ellipsis"},
   txMeta:{fontSize:12,color:C.textSub,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
   txAmt:{fontSize:15,fontWeight:700,whiteSpace:"nowrap",letterSpacing:-0.2},
+  txCat:{fontSize:12,fontWeight:600,color:C.inkSoft,background:C.bgAlt,borderRadius:999,padding:"4px 10px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"38%",flexShrink:1},
+  txCatNone:{color:C.textMut,background:"transparent",border:`1px dashed ${C.line2}`,fontWeight:500},
   amountWrap:{display:"flex",alignItems:"baseline",justifyContent:"center",gap:6,padding:"10px 0 22px"},
   amountInput:{width:"100%",maxWidth:240,border:"none",outline:"none",background:"transparent",fontSize:40,fontWeight:800,textAlign:"right",fontFamily:"inherit",letterSpacing:-1},
   amountCur:{fontSize:28,fontWeight:700,color:C.textMut},
