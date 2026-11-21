@@ -94,6 +94,7 @@ async function exportTransactions(txs,events){
   await shareCsv([head,...rows],`host-crm-финансы-${todayISO()}.csv`);
 }
 function sumTx(list){ return list.reduce((s,t)=>s+parseMoney(t.amount),0); }
+function plural(n,one,few,many){ const a=Math.abs(n)%100, b=a%10; return a>10&&a<20?many:b===1?one:b>=2&&b<=4?few:many; }
 function sumAmt(list){ return list.reduce((s,t)=>s+parseMoney(t.amount),0); }
 function enrich(rawEvents,txs){
   const by={};
@@ -214,7 +215,7 @@ function IconUsers({color}){return(<svg width="21" height="21" viewBox="0 0 24 2
 function IconChart({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke={color} strokeWidth="1.6" strokeLinecap="round"/></svg>);}
 function IconWallet({color}){return(<svg width="21" height="21" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="6" width="17" height="13" rx="2.5" stroke={color} strokeWidth="1.6"/><path d="M16 12.5h4.5M6.5 6l8-2.5 1.3 2.5" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/><circle cx="16.5" cy="12.5" r="0.9" fill={color}/></svg>);}
 function IconDownload({color}){return(<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" stroke={color} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/></svg>);}
-function TxRow({ t, meta, onClick, onRename, showCat }) {
+function TxRow({ t, meta, onClick, onRename, showCat, onCat }) {
   const inc=t.type==="income";
   const label=t.name||t.category||(inc?"Доход":"Расход");
   // название редактируется прямо в списке: Enter / тап мимо — сохранить, Esc — отменить
@@ -235,7 +236,9 @@ function TxRow({ t, meta, onClick, onRename, showCat }) {
           : <div style={s.txName}>{label}</div>}
         {meta&&<div style={s.txMeta}>{meta}</div>}
       </div>
-      {showCat&&<div style={t.category?s.txCat:{...s.txCat,...s.txCatNone}} title={t.category||"Без категории"}>{t.category||"Без категории"}</div>}
+      {showCat&&<div style={{...(t.category?s.txCat:{...s.txCat,...s.txCatNone}),cursor:onCat?"pointer":undefined}} className={onCat?"press":undefined}
+        title={onCat?`Показать всё: ${t.category||"Без категории"}`:(t.category||"Без категории")}
+        onClick={onCat?(e=>{ e.stopPropagation(); onCat(t.category||"Без категории"); }):undefined}>{t.category||"Без категории"}</div>}
       <div style={{...s.txAmt,color:inc?C.green:C.text}}>{inc?"+":"−"}{fmt(parseMoney(t.amount))} ₽</div>
     </div>
   );
@@ -714,6 +717,8 @@ function App() {
   const [finTab,setFinTab]=useState("income");
   const [dashTab,setDashTab]=useState("orders");
   const [finMonth,setFinMonth]=useState(todayISO().slice(0,7));
+  const [finCat,setFinCat]=useState(null); // выбранная категория в «Финансах»: показываем только её позиции
+  const finListRef=useRef(null);
   const [assetDraft,setAssetDraft]=useState(null);
   const [assetDel,setAssetDel]=useState(false);
   const [view,setView]=useState(V.LIST);
@@ -897,7 +902,11 @@ function App() {
     const byCat={}; list.forEach(t=>{ const k=t.category||"Без категории"; byCat[k]=(byCat[k]||0)+parseMoney(t.amount); });
     const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
     const total=type==="income"?inc:exp;
-    const groups=[]; list.forEach(t=>{ const g=groups[groups.length-1]; if(g&&g.date===t.date) g.items.push(t); else groups.push({date:t.date,items:[t]}); });
+    const catOf=t=>t.category||"Без категории";
+    const shown=finCat?list.filter(t=>catOf(t)===finCat):list;
+    const pickCat=k=>{ const next=finCat===k?null:k; setFinCat(next);
+      if(next) setTimeout(()=>finListRef.current&&finListRef.current.scrollIntoView({behavior:"smooth",block:"start"}),0); };
+    const groups=[]; shown.forEach(t=>{ const g=groups[groups.length-1]; if(g&&g.date===t.date) g.items.push(t); else groups.push({date:t.date,items:[t]}); });
     const evTitle=id=>{ const e=events.find(x=>x.id===id); return e?e.title:null; };
     return (
       <div style={s.screen}>
@@ -907,7 +916,7 @@ function App() {
         {error&&<Err error={error} clear={()=>setError(null)}/>}
         <div style={{padding:"12px 16px 8px",flexShrink:0}}>
           <div style={s.seg}>{[["income","Доходы"],["expense","Расходы"],["assets","Активы"]].map(([k,l])=>(
-            <button key={k} className="press" style={{...s.segBtn,...(finTab===k?s.segOn:{})}} onClick={()=>setFinTab(k)}>{l}</button>))}</div>
+            <button key={k} className="press" style={{...s.segBtn,...(finTab===k?s.segOn:{})}} onClick={()=>{ setFinTab(k); setFinCat(null); }}>{l}</button>))}</div>
         </div>
         {finTab==="assets"?<AssetsView assets={assets} onOpen={openAsset}/>:(
           <div style={{flex:1,overflowY:"auto",padding:"4px 16px 28px"}}>
@@ -927,24 +936,35 @@ function App() {
             {cats.length>0&&(
               <div style={s.panel}>
                 <div style={s.panelTitle}>{type==="income"?"Доходы":"Расходы"} по категориям</div>
-                {cats.map(([k,v])=>(
-                  <div key={k} style={{marginBottom:10}}>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:5}}>
+                <div style={{fontSize:12,color:C.textMut,margin:"-4px 0 10px"}}>Нажмите на категорию, чтобы увидеть её позиции</div>
+                {cats.map(([k,v])=>{ const on=finCat===k, dim=finCat&&!on; return (
+                  <button key={k} className="press" onClick={()=>pickCat(k)} aria-pressed={on}
+                    style={{...s.catRow,...(on?s.catRowOn:{}),opacity:dim?0.45:1}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,fontSize:13,marginBottom:5}}>
                       <span style={{color:C.text,fontWeight:600}}>{k}</span>
-                      <span style={{color:C.textSub,fontWeight:600}}>{fmt(v)} ₽ · {Math.round(v/total*100)}%</span>
+                      <span style={{color:C.textSub,fontWeight:600,whiteSpace:"nowrap"}}>{fmt(v)} ₽ · {Math.round(v/total*100)}% <span style={{color:C.textMut}}>›</span></span>
                     </div>
                     <div style={{height:6,background:C.bgAlt,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.round(v/total*100)}%`,background:type==="income"?C.green:C.brass,borderRadius:3}}/></div>
-                  </div>
-                ))}
+                  </button>); })}
               </div>
             )}
-            {groups.length===0&&<div style={{...s.panel,textAlign:"center",color:C.textSub,fontSize:13}}>{type==="income"?"Доходов":"Расходов"} в этом месяце нет</div>}
+            <div ref={finListRef} style={{scrollMarginTop:8}}/>
+            {finCat&&(
+              <div style={s.catFilter}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:15,fontWeight:700,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{finCat}</div>
+                  <div style={{fontSize:12,color:C.textSub,marginTop:2}}>{shown.length} {plural(shown.length,"позиция","позиции","позиций")} · {fmt(sumTx(shown))} ₽</div>
+                </div>
+                <button className="press" style={s.catFilterX} onClick={()=>setFinCat(null)}>Все ✕</button>
+              </div>
+            )}
+            {groups.length===0&&<div style={{...s.panel,textAlign:"center",color:C.textSub,fontSize:13}}>{finCat?`В категории «${finCat}» в этом месяце ничего нет`:`${type==="income"?"Доходов":"Расходов"} в этом месяце нет`}</div>}
             {groups.map(g=>(
               <div key={g.date}>
                 <div style={s.groupHead}>{formatDate(g.date)}</div>
                 <div style={{...s.panel,padding:"2px 16px"}}>
                   {g.items.map(t=>{ const et=evTitle(t.eventId);
-                    return <TxRow key={t.id} t={t} showCat meta={et&&<span style={{color:C.brass}}>{et}</span>} onClick={()=>openTx(t,V.FIN)} onRename={renameTx}/>; })}
+                    return <TxRow key={t.id} t={t} showCat onCat={pickCat} meta={et&&<span style={{color:C.brass}}>{et}</span>} onClick={()=>openTx(t,V.FIN)} onRename={renameTx}/>; })}
                 </div>
               </div>
             ))}
@@ -1189,6 +1209,10 @@ const s = {
   txMeta:{fontSize:12,color:C.textSub,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"},
   txAmt:{fontSize:15,fontWeight:700,whiteSpace:"nowrap",letterSpacing:-0.2},
   txCat:{fontSize:12,fontWeight:600,color:C.inkSoft,background:C.bgAlt,borderRadius:999,padding:"4px 10px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"38%",flexShrink:1},
+  catRow:{display:"block",width:"100%",textAlign:"left",background:"transparent",border:"none",borderRadius:10,padding:"6px 8px",margin:"0 -8px 4px",boxSizing:"content-box",cursor:"pointer",font:"inherit",transition:"opacity .15s, background .15s"},
+  catRowOn:{background:C.brassSoft},
+  catFilter:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,background:C.surface,border:`1.5px solid ${C.brass}`,borderRadius:14,padding:"10px 12px 10px 16px",margin:"4px 0 6px"},
+  catFilterX:{flexShrink:0,background:C.bgAlt,border:"none",borderRadius:999,padding:"7px 12px",fontSize:13,fontWeight:600,color:C.inkSoft,cursor:"pointer",font:"inherit"},
   txCatNone:{color:C.textMut,background:"transparent",border:`1px dashed ${C.line2}`,fontWeight:500},
   amountWrap:{display:"flex",alignItems:"baseline",justifyContent:"center",gap:6,padding:"10px 0 22px"},
   amountInput:{width:"100%",maxWidth:240,border:"none",outline:"none",background:"transparent",fontSize:40,fontWeight:800,textAlign:"right",fontFamily:"inherit",letterSpacing:-1},
